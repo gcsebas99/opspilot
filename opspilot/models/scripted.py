@@ -23,7 +23,18 @@ class ScriptedModel:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> ModelResponse:
-        self.calls.append({"system": system, "messages": messages, "tools": tools})
+        # Snapshot (shallow-copy) the list arguments -- the loop keeps
+        # mutating its `messages` list via .append() on every turn, so
+        # storing the live reference would make every past call's recorded
+        # "messages" silently grow to match the CURRENT state by the time a
+        # test inspects it after the run finishes.
+        self.calls.append(
+            {
+                "system": list(system) if isinstance(system, list) else system,
+                "messages": list(messages),
+                "tools": list(tools),
+            }
+        )
         if self._index >= len(self._responses):
             raise IndexError(
                 f"ScriptedModel exhausted: only {len(self._responses)} response(s) scripted, "
