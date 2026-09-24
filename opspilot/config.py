@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
     opspilot_tool_output_max_chars: int = Field(
         default=4_000, alias="OPSPILOT_TOOL_OUTPUT_MAX_CHARS"
     )
+    opspilot_store: Literal["memory", "mongo"] = Field(default="memory", alias="OPSPILOT_STORE")
+    mongodb_uri: str = Field(default="", alias="MONGODB_URI")
 
 
 @lru_cache
