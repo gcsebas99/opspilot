@@ -102,3 +102,75 @@ class MongoStore:
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         docs = [doc async for doc in self._db.approvals.find({"status": "pending"})]
         return [ApprovalDoc.model_validate(doc) for doc in docs]
+
+    # [HARNESS:OBS] Real Mongo aggregation pipelines, not fetch-then-compute.
+    # WHY: $percentile (MongoDB 7+, confirmed against the project's own
+    # mongo:7 container rather than assumed) and $group push the computation
+    # to the database -- the alternative (pulling every span/run doc back
+    # and reducing in Python) doesn't scale past a small dev dataset and
+    # defeats the point of using an aggregation database. MemoryStore
+    # mirrors the same *results* in plain Python purely so tests don't need
+    # Mongo running -- it is not meant to demonstrate the technique.
+    # INTERVIEW: "Why $percentile with method: approximate instead of exact
+    # sort+index?" -> approximate (t-digest) percentiles are the documented,
+    # performant choice for this use case; exact percentiles require sorting
+    # the whole collection.
+    async def model_call_latency_percentiles(self) -> dict[str, float]:
+        cursor = await self._db.spans.aggregate(
+            [
+                {"$match": {"kind": "model_call"}},
+                {
+                    "$group": {
+                        "_id": None,
+                        "pcts": {
+                            "$percentile": {
+                                "input": "$duration_ms",
+                                "p": [0.5, 0.95],
+                                "method": "approximate",
+                            }
+                        },
+                    }
+                },
+            ]
+        )
+        docs = [doc async for doc in cursor]
+        if not docs:
+            return {"p50": 0.0, "p95": 0.0}
+        p50, p95 = docs[0]["pcts"]
+        return {"p50": p50, "p95": p95}
+
+    async def tool_error_rates(self) -> dict[str, float]:
+        cursor = await self._db.spans.aggregate(
+            [
+                {"$match": {"kind": "tool_call"}},
+                {
+                    "$group": {
+                        "_id": "$name",
+                        "total": {"$sum": 1},
+                        "errors": {"$sum": {"$cond": [{"$eq": ["$status", "error"]}, 1, 0]}},
+                    }
+                },
+            ]
+        )
+        docs = [doc async for doc in cursor]
+        return {doc["_id"]: doc["errors"] / doc["total"] for doc in docs}
+
+    async def outcomes_distribution(self) -> dict[str, int]:
+        cursor = await self._db.runs.aggregate(
+            [
+                {"$match": {"outcome": {"$ne": None}}},
+                {"$group": {"_id": "$outcome", "count": {"$sum": 1}}},
+            ]
+        )
+        docs = [doc async for doc in cursor]
+        return {doc["_id"]: doc["count"] for doc in docs}
+
+    async def avg_cost_by_scenario(self) -> dict[str, float]:
+        cursor = await self._db.runs.aggregate(
+            [
+                {"$match": {"cost_usd": {"$ne": None}}},
+                {"$group": {"_id": "$scenario", "avg_cost": {"$avg": "$cost_usd"}}},
+            ]
+        )
+        docs = [doc async for doc in cursor]
+        return {doc["_id"]: doc["avg_cost"] for doc in docs}

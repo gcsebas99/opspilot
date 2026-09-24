@@ -1,4 +1,6 @@
 import asyncio
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -7,11 +9,19 @@ import typer
 from rich.console import Console
 
 from opspilot.config import get_settings
+from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.cli import app as env_app
 from opspilot.env.generator import build_sandbox
 from opspilot.env.scenarios import get_scenario
 from opspilot.loops.react_raw import LoopEvent, RunResult, run_react_loop
 from opspilot.models.anthropic_model import AnthropicModel
+from opspilot.observability.instrumentation import record_loop_spans
+from opspilot.observability.metrics import build_dashboard, run_summary
+from opspilot.observability.pricing import cost_usd
+from opspilot.observability.tracer import Tracer
+from opspilot.store.base import Store
+from opspilot.store.factory import build_store
+from opspilot.store.models import RunDoc, SpanDoc
 from opspilot.tools.registry import build_default_registry
 
 app = typer.Typer(
@@ -42,13 +52,17 @@ def _print_event(event: LoopEvent) -> None:
             f"latency={data['latency_ms']:.0f}ms"
         )
     elif event.type == "tool_call":
-        console.print(f"  [yellow]tool_call:[/yellow] {data['name']}({data['input']})")
+        console.print(
+            f"  [yellow]tool_call:[/yellow] {data['name']}({data['input']}) "
+            f"ok={data['ok']} {data['duration_ms']:.0f}ms"
+        )
     elif event.type == "exit":
         console.print(f"[bold]exit:[/bold] outcome={data['outcome']} after {data['steps']} step(s)")
 
 
-def _print_summary(result: RunResult) -> None:
+def _print_summary(result: RunResult, run_id: str) -> None:
     console.print()
+    console.print(f"[bold]run_id:[/bold] {run_id}")
     console.print(f"[bold]outcome:[/bold] {result.outcome}")
     console.print(f"[bold]steps:[/bold] {result.steps}")
     tokens = result.tokens
@@ -103,18 +117,153 @@ async def _run_async(
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0)
     model = AnthropicModel(client=client, model=settings.opspilot_model)
 
-    result = await run_react_loop(
-        model=model,
-        registry=registry,
-        sandbox=sandbox,
-        alert=scn.alert_text,
-        settings=settings,
-        allow_destructive=allow_destructive,
-        max_steps=max_steps,
-        on_event=_print_event,
+    store = build_store(settings)
+    await store.ensure_indexes()
+    run_id = str(uuid.uuid4())
+    tracer = Tracer(store, run_id=run_id)
+    # --role (viewer/operator/admin) lands properly in 2.4's permission
+    # policy; this is a placeholder mapping so RunDoc has something sane.
+    role = "operator" if allow_destructive else "viewer"
+
+    await store.insert_run(
+        RunDoc(
+            run_id=run_id,
+            created_at=datetime.now(UTC),
+            scenario=scenario_name,
+            seed=seed,
+            role=role,
+            model=settings.opspilot_model,
+            prompt_version=prompt_version(CONTEXT_DIR, registry.to_anthropic_schema()),
+            strategy="raw",
+        )
     )
 
-    _print_summary(result)
+    events: list[LoopEvent] = []
+
+    def on_event(event: LoopEvent) -> None:
+        events.append(event)
+        _print_event(event)
+
+    async with tracer.span(
+        "run", "react_loop", scenario=scenario_name, seed=seed, role=role, strategy="raw"
+    ) as run_span:
+        result = await run_react_loop(
+            model=model,
+            registry=registry,
+            sandbox=sandbox,
+            alert=scn.alert_text,
+            settings=settings,
+            allow_destructive=allow_destructive,
+            max_steps=max_steps,
+            on_event=on_event,
+        )
+        # Must stay inside the `async with` -- record_span() reads the
+        # ambient parent span from a contextvar that's reset the moment
+        # this block exits, so writing the nested spans after exit would
+        # silently produce a flat trace (every span's parent_id = None).
+        await record_loop_spans(tracer, run_span.start, events, model=settings.opspilot_model)
+
+    total_cost = cost_usd(
+        settings.opspilot_model,
+        input_tokens=result.tokens.input_tokens,
+        output_tokens=result.tokens.output_tokens,
+        cache_creation_input_tokens=result.tokens.cache_creation_input_tokens,
+        cache_read_input_tokens=result.tokens.cache_read_input_tokens,
+    )
+    await store.update_run(
+        run_id,
+        {
+            "outcome": result.outcome,
+            "steps": result.steps,
+            "tokens": result.tokens.model_dump(),
+            "cost_usd": total_cost,
+            "finished_at": datetime.now(UTC),
+        },
+    )
+
+    _print_summary(result, run_id)
+
+
+@app.command("trace")
+def trace(run_id: str = typer.Argument(..., help="Run ID to show the waterfall for.")) -> None:
+    """Print a waterfall tree of spans for one run."""
+    asyncio.run(_trace_async(run_id))
+
+
+async def _trace_async(run_id: str) -> None:
+    settings = get_settings()
+    store = build_store(settings)
+
+    summary = await run_summary(store, run_id)
+    if summary is None:
+        console.print(f"[red]no run found with id {run_id!r}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[bold]run:[/bold] {summary.run_id}  scenario={summary.scenario}  "
+        f"outcome={summary.outcome}"
+    )
+    console.print(
+        f"[bold]steps:[/bold] {summary.steps}  cost=${summary.cost_usd or 0:.4f}  "
+        f"duration={summary.duration_s or 0:.1f}s"
+    )
+    console.print(f"[bold]tokens:[/bold] {summary.tokens}\n")
+
+    spans = await store.list_spans(run_id)
+    _print_waterfall(spans)
+
+
+def _print_waterfall(spans: list[SpanDoc]) -> None:
+    by_parent: dict[str | None, list[SpanDoc]] = {}
+    for span in spans:
+        by_parent.setdefault(span.parent_id, []).append(span)
+    for children in by_parent.values():
+        children.sort(key=lambda s: s.start)
+
+    def _print_node(span: SpanDoc, depth: int) -> None:
+        indent = "  " * depth
+        duration = f"{span.duration_ms:.0f}ms" if span.duration_ms is not None else "?"
+        status_color = "red" if span.status == "error" else "green"
+        console.print(
+            f"{indent}[{status_color}]{span.kind}[/{status_color}] {span.name} ({duration})"
+        )
+        for child in by_parent.get(span.span_id, []):
+            _print_node(child, depth + 1)
+
+    for root in by_parent.get(None, []):
+        _print_node(root, 0)
+
+
+@app.command("metrics")
+def metrics() -> None:
+    """Print the cross-run metrics dashboard."""
+    asyncio.run(_metrics_async())
+
+
+async def _metrics_async() -> None:
+    settings = get_settings()
+    store: Store = build_store(settings)
+
+    dashboard = await build_dashboard(store)
+
+    console.print("[bold]Model call latency (ms)[/bold]")
+    p50 = dashboard.model_call_latency_percentiles.get("p50", 0.0)
+    p95 = dashboard.model_call_latency_percentiles.get("p95", 0.0)
+    console.print(f"  p50={p50:.0f}  p95={p95:.0f}\n")
+
+    console.print("[bold]Tool error rate[/bold]")
+    for tool, rate in sorted(dashboard.tool_error_rates.items()):
+        console.print(f"  {tool}: {rate:.1%}")
+    console.print()
+
+    console.print("[bold]Outcomes[/bold]")
+    for outcome, count in sorted(dashboard.outcomes_distribution.items()):
+        console.print(f"  {outcome}: {count}")
+    console.print()
+
+    console.print("[bold]Avg cost by scenario[/bold]")
+    for scenario, avg in sorted(dashboard.avg_cost_by_scenario.items()):
+        console.print(f"  {scenario}: ${avg:.4f}")
 
 
 if __name__ == "__main__":

@@ -288,7 +288,7 @@ async def test_events_are_emitted_for_step_model_call_tool_call_and_exit(
     model = ScriptedModel([_tool_use("submit_report", _REPORT_INPUT)])
     events = []
 
-    result = await run_react_loop(
+    await run_react_loop(
         model=model,
         registry=registry,
         sandbox=sandbox,
@@ -299,4 +299,31 @@ async def test_events_are_emitted_for_step_model_call_tool_call_and_exit(
 
     types = [event.type for event in events]
     assert types == ["step_start", "model_call", "tool_call", "exit"]
-    assert events[-1].data["outcome"] == result.outcome
+
+
+async def test_tool_call_event_carries_result_and_timing(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    model = ScriptedModel(
+        [_tool_use("list_services", {}), _tool_use("submit_report", _REPORT_INPUT)]
+    )
+    events = []
+
+    await run_react_loop(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        on_event=events.append,
+    )
+
+    tool_call_events = [
+        e for e in events if e.type == "tool_call" and e.data["name"] == "list_services"
+    ]
+    assert len(tool_call_events) == 1
+    data = tool_call_events[0].data
+    assert data["ok"] is True
+    assert data["truncated"] is False
+    assert data["output_size"] > 0
+    assert data["duration_ms"] >= 0

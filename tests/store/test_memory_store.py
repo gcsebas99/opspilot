@@ -6,26 +6,44 @@ from opspilot.store.memory import MemoryStore
 from opspilot.store.models import ApprovalDoc, AuditDoc, RunDoc, SpanDoc
 
 
-def _run(run_id: str = "run-1", created_at: datetime | None = None) -> RunDoc:
+def _run(
+    run_id: str = "run-1",
+    created_at: datetime | None = None,
+    scenario: str = "checkout_pool_exhaustion",
+    outcome: str | None = None,
+    cost_usd: float | None = None,
+) -> RunDoc:
     return RunDoc(
         run_id=run_id,
         created_at=created_at or datetime(2025, 1, 1, tzinfo=UTC),
-        scenario="checkout_pool_exhaustion",
+        scenario=scenario,
         seed=42,
         role="operator",
         model="claude-opus-5",
         prompt_version="abc123",
         strategy="raw",
+        outcome=outcome,
+        cost_usd=cost_usd,
     )
 
 
-def _span(span_id: str, run_id: str = "run-1", start: datetime | None = None) -> SpanDoc:
+def _span(
+    span_id: str,
+    run_id: str = "run-1",
+    start: datetime | None = None,
+    kind: str = "tool_call",
+    name: str = "grep_logs",
+    duration_ms: float | None = None,
+    status: str = "ok",
+) -> SpanDoc:
     return SpanDoc(
         span_id=span_id,
         run_id=run_id,
-        kind="tool_call",
-        name="grep_logs",
+        kind=kind,  # type: ignore[arg-type]
+        name=name,
         start=start or datetime(2025, 1, 1, tzinfo=UTC),
+        duration_ms=duration_ms,
+        status=status,  # type: ignore[arg-type]
     )
 
 
@@ -167,3 +185,59 @@ async def test_list_pending_approvals(store: MemoryStore) -> None:
     pending = await store.list_pending_approvals()
 
     assert [a.approval_id for a in pending] == ["appr-1"]
+
+
+async def test_model_call_latency_percentiles(store: MemoryStore) -> None:
+    for i, duration in enumerate([10.0, 20.0, 30.0, 40.0, 100.0]):
+        await store.insert_span(
+            _span(f"s{i}", kind="model_call", name="model.create", duration_ms=duration)
+        )
+    await store.insert_span(
+        _span("tool-span", kind="tool_call", duration_ms=999.0)
+    )  # must be excluded
+
+    percentiles = await store.model_call_latency_percentiles()
+
+    assert percentiles["p50"] == 30.0
+    assert percentiles["p95"] == 100.0
+
+
+async def test_model_call_latency_percentiles_empty(store: MemoryStore) -> None:
+    percentiles = await store.model_call_latency_percentiles()
+
+    assert percentiles == {"p50": 0.0, "p95": 0.0}
+
+
+async def test_tool_error_rates(store: MemoryStore) -> None:
+    await store.insert_span(_span("s1", kind="tool_call", name="grep_logs", status="ok"))
+    await store.insert_span(_span("s2", kind="tool_call", name="grep_logs", status="ok"))
+    await store.insert_span(_span("s3", kind="tool_call", name="grep_logs", status="error"))
+    await store.insert_span(_span("s4", kind="tool_call", name="rollback_config", status="ok"))
+
+    rates = await store.tool_error_rates()
+
+    assert rates["grep_logs"] == pytest.approx(1 / 3)
+    assert rates["rollback_config"] == 0.0
+
+
+async def test_outcomes_distribution(store: MemoryStore) -> None:
+    await store.insert_run(_run("run-1", outcome="completed"))
+    await store.insert_run(_run("run-2", outcome="completed"))
+    await store.insert_run(_run("run-3", outcome="escalated"))
+    await store.insert_run(_run("run-4", outcome=None))  # still running -- excluded
+
+    distribution = await store.outcomes_distribution()
+
+    assert distribution == {"completed": 2, "escalated": 1}
+
+
+async def test_avg_cost_by_scenario(store: MemoryStore) -> None:
+    await store.insert_run(_run("run-1", scenario="checkout_pool_exhaustion", cost_usd=0.10))
+    await store.insert_run(_run("run-2", scenario="checkout_pool_exhaustion", cost_usd=0.20))
+    await store.insert_run(_run("run-3", scenario="payments_bad_deploy", cost_usd=0.50))
+    await store.insert_run(_run("run-4", scenario="payments_bad_deploy", cost_usd=None))  # excluded
+
+    avg_cost = await store.avg_cost_by_scenario()
+
+    assert avg_cost["checkout_pool_exhaustion"] == pytest.approx(0.15)
+    assert avg_cost["payments_bad_deploy"] == pytest.approx(0.50)

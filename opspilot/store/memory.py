@@ -64,3 +64,49 @@ class MemoryStore:
 
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         return [a for a in self._approvals.values() if a.status == "pending"]
+
+    async def model_call_latency_percentiles(self) -> dict[str, float]:
+        durations = sorted(
+            s.duration_ms
+            for s in self._spans
+            if s.kind == "model_call" and s.duration_ms is not None
+        )
+        return {"p50": _percentile(durations, 0.5), "p95": _percentile(durations, 0.95)}
+
+    async def tool_error_rates(self) -> dict[str, float]:
+        totals: dict[str, int] = {}
+        errors: dict[str, int] = {}
+        for span in self._spans:
+            if span.kind != "tool_call":
+                continue
+            totals[span.name] = totals.get(span.name, 0) + 1
+            if span.status == "error":
+                errors[span.name] = errors.get(span.name, 0) + 1
+        return {tool: errors.get(tool, 0) / total for tool, total in totals.items()}
+
+    async def outcomes_distribution(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for run in self._runs.values():
+            if run.outcome is None:
+                continue
+            counts[run.outcome] = counts.get(run.outcome, 0) + 1
+        return counts
+
+    async def avg_cost_by_scenario(self) -> dict[str, float]:
+        totals: dict[str, list[float]] = {}
+        for run in self._runs.values():
+            if run.cost_usd is None:
+                continue
+            totals.setdefault(run.scenario, []).append(run.cost_usd)
+        return {scenario: sum(costs) / len(costs) for scenario, costs in totals.items()}
+
+
+def _percentile(sorted_values: list[float], p: float) -> float:
+    """Nearest-rank percentile. Not the same algorithm MongoStore's
+    approximate $percentile uses -- each backend only needs to be
+    internally consistent, not bit-identical to the other.
+    """
+    if not sorted_values:
+        return 0.0
+    index = min(len(sorted_values) - 1, round(p * (len(sorted_values) - 1)))
+    return sorted_values[index]

@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -198,8 +199,7 @@ async def run_react_loop(
                 nudged_for_stuck = False
             last_signature = signature
 
-            emit("tool_call", step=steps, name=block.name, input=block.input)
-
+            tool_start = time.monotonic()
             tool = registry.get(block.name) if block.name in registry else None
             if tool is not None and tool.risk == "destructive" and not allow_destructive:
                 result = ToolResult(
@@ -208,6 +208,21 @@ async def run_react_loop(
                 )
             else:
                 result = registry.execute(block.name, block.input, sandbox)
+            tool_duration_ms = (time.monotonic() - tool_start) * 1000
+
+            # Emitted after execution (not before, as in earlier Day 1 code)
+            # so observability consumers (2.2) get real duration/result data
+            # in the same event, rather than needing a second "tool_call_end".
+            emit(
+                "tool_call",
+                step=steps,
+                name=block.name,
+                input=block.input,
+                ok=result.ok,
+                duration_ms=tool_duration_ms,
+                truncated=result.truncated,
+                output_size=len(result.content),
+            )
 
             tool_calls.append(
                 ToolCallRecord(
