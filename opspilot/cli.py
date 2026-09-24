@@ -2,10 +2,11 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anthropic
 import typer
+from langchain_anthropic import ChatAnthropic
 from rich.console import Console
 
 from opspilot.config import get_settings
@@ -13,6 +14,7 @@ from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.cli import app as env_app
 from opspilot.env.generator import build_sandbox
 from opspilot.env.scenarios import get_scenario
+from opspilot.loops.graph import build_checkpointer, run_react_graph
 from opspilot.loops.react_raw import LoopEvent, RunResult, run_react_loop
 from opspilot.models.anthropic_model import AnthropicModel
 from opspilot.observability.instrumentation import record_loop_spans
@@ -87,13 +89,23 @@ def run(
         False, "--allow-destructive", help="Permit destructive tools (restart/rollback)."
     ),
     max_steps: int | None = typer.Option(None, "--max-steps", help="Override OPSPILOT_MAX_STEPS."),
+    strategy: str = typer.Option(
+        "graph", "--strategy", help="Loop implementation: raw (Day 1) or graph (LangGraph, 2.3)."
+    ),
 ) -> None:
-    """Run the hand-written ReAct loop against a scenario's alert."""
-    asyncio.run(_run_async(scenario, seed, allow_destructive, max_steps))
+    """Run the ReAct agent against a scenario's alert."""
+    if strategy not in ("raw", "graph"):
+        console.print(f"[red]--strategy must be 'raw' or 'graph', got {strategy!r}[/red]")
+        raise typer.Exit(code=1)
+    asyncio.run(_run_async(scenario, seed, allow_destructive, max_steps, strategy))  # type: ignore[arg-type]
 
 
 async def _run_async(
-    scenario_name: str, seed: int, allow_destructive: bool, max_steps: int | None
+    scenario_name: str,
+    seed: int,
+    allow_destructive: bool,
+    max_steps: int | None,
+    strategy: Literal["raw", "graph"],
 ) -> None:
     settings = get_settings()
 
@@ -111,11 +123,10 @@ async def _run_async(
         raise typer.Exit(code=1) from exc
 
     console.print(f"[bold]alert:[/bold] {scn.alert_text}")
+    console.print(f"[dim]strategy:[/dim] {strategy}")
     console.print(f"[dim]sandbox:[/dim] {sandbox.root}\n")
 
     registry = build_default_registry(settings)
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0)
-    model = AnthropicModel(client=client, model=settings.opspilot_model)
 
     store = build_store(settings)
     await store.ensure_indexes()
@@ -134,34 +145,66 @@ async def _run_async(
             role=role,
             model=settings.opspilot_model,
             prompt_version=prompt_version(CONTEXT_DIR, registry.to_anthropic_schema()),
-            strategy="raw",
+            strategy=strategy,
         )
     )
 
-    events: list[LoopEvent] = []
+    if strategy == "raw":
+        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0)
+        raw_model = AnthropicModel(client=client, model=settings.opspilot_model)
+        events: list[LoopEvent] = []
 
-    def on_event(event: LoopEvent) -> None:
-        events.append(event)
-        _print_event(event)
+        def on_event(event: LoopEvent) -> None:
+            events.append(event)
+            _print_event(event)
 
-    async with tracer.span(
-        "run", "react_loop", scenario=scenario_name, seed=seed, role=role, strategy="raw"
-    ) as run_span:
-        result = await run_react_loop(
-            model=model,
-            registry=registry,
-            sandbox=sandbox,
-            alert=scn.alert_text,
-            settings=settings,
-            allow_destructive=allow_destructive,
-            max_steps=max_steps,
-            on_event=on_event,
+        async with tracer.span(
+            "run", "react_loop", scenario=scenario_name, seed=seed, role=role, strategy="raw"
+        ) as run_span:
+            result = await run_react_loop(
+                model=raw_model,
+                registry=registry,
+                sandbox=sandbox,
+                alert=scn.alert_text,
+                settings=settings,
+                allow_destructive=allow_destructive,
+                max_steps=max_steps,
+                on_event=on_event,
+            )
+            # Must stay inside the `async with` -- record_span() reads the
+            # ambient parent span from a contextvar that's reset the moment
+            # this block exits, so writing the nested spans after exit
+            # would silently produce a flat trace (parent_id=None everywhere).
+            await record_loop_spans(tracer, run_span.start, events, model=settings.opspilot_model)
+    else:
+        chat_model = ChatAnthropic(
+            model=settings.opspilot_model, max_tokens=8192, api_key=settings.anthropic_api_key
         )
-        # Must stay inside the `async with` -- record_span() reads the
-        # ambient parent span from a contextvar that's reset the moment
-        # this block exits, so writing the nested spans after exit would
-        # silently produce a flat trace (every span's parent_id = None).
-        await record_loop_spans(tracer, run_span.start, events, model=settings.opspilot_model)
+        bound_model = chat_model.bind_tools(registry.to_anthropic_schema())
+        checkpointer, mongo_client = build_checkpointer(settings)
+        console.print(
+            "[dim](graph strategy: live per-step output lands in `opspilot trace`)[/dim]\n"
+        )
+        try:
+            async with tracer.span(
+                "run", "react_graph", scenario=scenario_name, seed=seed, role=role, strategy="graph"
+            ):
+                result = await run_react_graph(
+                    model=bound_model,
+                    registry=registry,
+                    sandbox=sandbox,
+                    alert=scn.alert_text,
+                    settings=settings,
+                    tracer=tracer,
+                    checkpointer=checkpointer,
+                    run_id=run_id,
+                    role=role,
+                    allow_destructive=allow_destructive,
+                    max_steps=max_steps,
+                )
+        finally:
+            if mongo_client is not None:
+                mongo_client.close()
 
     total_cost = cost_usd(
         settings.opspilot_model,

@@ -1,21 +1,8 @@
-import json
 from datetime import datetime, timedelta
-from typing import Any
 
 from opspilot.loops.react_raw import LoopEvent
 from opspilot.observability.pricing import cost_usd
-from opspilot.observability.tracer import Tracer
-
-_MAX_ARGS_CHARS = 500
-
-
-def _redact_if_large(
-    args: dict[str, Any], max_chars: int = _MAX_ARGS_CHARS
-) -> dict[str, Any] | str:
-    serialized = json.dumps(args, sort_keys=True, default=str)
-    if len(serialized) <= max_chars:
-        return args
-    return f"<redacted: {len(serialized)} chars>"
+from opspilot.observability.tracer import Tracer, redact_if_large
 
 
 # [HARNESS:OBS] Reconstructing spans from events instead of instrumenting the
@@ -71,7 +58,7 @@ async def record_loop_spans(
                 duration_ms=duration_ms,
                 status="ok" if event.data["ok"] else "error",
                 tool=event.data["name"],
-                args=_redact_if_large(event.data["input"]),
+                args=redact_if_large(event.data["input"]),
                 ok=event.data["ok"],
                 truncated=event.data["truncated"],
                 output_size=event.data["output_size"],

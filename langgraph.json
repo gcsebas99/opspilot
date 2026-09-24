@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "opspilot": "opspilot/loops/graph_studio.py:GRAPH"
+  },
+  "env": ".env"
+}
