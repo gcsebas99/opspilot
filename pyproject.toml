@@ -32,6 +32,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
     "mypy>=1.13",
+    "types-PyYAML>=6.0",
 ]
 
 [tool.ruff]
@@ -40,6 +41,9 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+# B008: typer's `= typer.Option(...)` / `= typer.Argument(...)` default-value pattern is
+# the documented way to declare CLI options -- not the mutable-default footgun B008 targets.
+ignore = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
