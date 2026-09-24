@@ -6,6 +6,7 @@ import sqlite3
 import yaml
 from pydantic import BaseModel, Field
 
+from opspilot.context.runbooks import RUNBOOK_INDEX, runbook_path
 from opspilot.env.generator import WINDOW_MINUTES
 from opspilot.env.sandbox import Sandbox
 from opspilot.tools.base import Tool, ToolResult
@@ -269,4 +270,45 @@ LIST_DEPLOYS = Tool(
     fn=_list_deploys,
 )
 
-READ_TOOLS = [LIST_SERVICES, GREP_LOGS, QUERY_METRICS, READ_CONFIG, CONFIG_HISTORY, LIST_DEPLOYS]
+
+class LoadRunbookInput(BaseModel):
+    name: str = Field(description="Runbook name from the index, e.g. 'db_pool_issues'.")
+
+
+def _load_runbook(sandbox: Sandbox, args: BaseModel) -> ToolResult:
+    assert isinstance(args, LoadRunbookInput)
+    if args.name not in RUNBOOK_INDEX:
+        known = ", ".join(sorted(RUNBOOK_INDEX))
+        return ToolResult(
+            ok=False, content=f"unknown runbook {args.name!r}; known runbooks: {known}"
+        )
+
+    path = runbook_path(args.name)
+    if not path.exists():
+        return ToolResult(ok=False, content=f"runbook file missing for {args.name!r}")
+
+    return ToolResult(ok=True, content=path.read_text())
+
+
+LOAD_RUNBOOK = Tool(
+    name="load_runbook",
+    description=(
+        "Load the full text of a runbook by name -- see the runbook index in "
+        "your system prompt for available names and one-line descriptions. "
+        "Use this once a specific failure mode looks likely, rather than "
+        "guessing at remediation steps."
+    ),
+    input_model=LoadRunbookInput,
+    risk="read",
+    fn=_load_runbook,
+)
+
+READ_TOOLS = [
+    LIST_SERVICES,
+    GREP_LOGS,
+    QUERY_METRICS,
+    READ_CONFIG,
+    CONFIG_HISTORY,
+    LIST_DEPLOYS,
+    LOAD_RUNBOOK,
+]

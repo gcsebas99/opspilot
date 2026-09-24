@@ -101,3 +101,17 @@ def test_list_deploys_all_services(payments_sandbox: Sandbox) -> None:
     assert result.ok is True
     assert result.data is not None
     assert len(result.data["deploys"]) >= 4  # 3 boring noise deploys + the payments one
+
+
+def test_load_runbook_known_name(checkout_sandbox: Sandbox) -> None:
+    result = _registry().execute("load_runbook", {"name": "db_pool_issues"}, checkout_sandbox)
+
+    assert result.ok is True
+    assert "Diagnostic steps" in result.content
+
+
+def test_load_runbook_unknown_name(checkout_sandbox: Sandbox) -> None:
+    result = _registry().execute("load_runbook", {"name": "not_a_runbook"}, checkout_sandbox)
+
+    assert result.ok is False
+    assert "not_a_runbook" in result.content
