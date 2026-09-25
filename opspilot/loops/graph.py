@@ -18,6 +18,12 @@ from opspilot.context.assembler import build_system_blocks
 from opspilot.env.sandbox import Sandbox
 from opspilot.loops.react_raw import RunResult, TokenTotals, ToolCallRecord
 from opspilot.observability.tracer import Tracer, redact_if_large
+from opspilot.policy.guardrails import (
+    INJECTION_WARNING,
+    detect_prompt_injection,
+    frame_tool_output,
+    is_in_scope,
+)
 from opspilot.policy.permissions import Allow, Deny, Role, decide
 from opspilot.store.base import Store
 from opspilot.store.models import ApprovalDoc
@@ -42,6 +48,15 @@ class AgentState(TypedDict):
     policy_edited_args: dict[str, dict[str, Any]] | None
     role: Role
     run_id: str
+    alert: str
+    # [HARNESS:GUARD] Services a *successful read tool call* has actually
+    # touched this run -- see react_raw.py's identical field for the WHY
+    # (only reads that succeeded, never a blocked/denied destructive
+    # attempt, grow this). A step lag behind the raw loop: the policy node
+    # runs entirely before the tools node, so within one step a fresh read
+    # can't unlock a destructive call in the *same* parallel batch the way
+    # it can there -- an accepted coarser granularity, not a bug.
+    known_services: list[str]
     last_tool_signature: tuple[str, str] | None
     repeat_count: int
     nudged_for_stuck: bool
@@ -178,6 +193,8 @@ def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> A
             raise TypeError(f"expected AIMessage with tool_calls, got {type(last).__name__}")
         role = state["role"]
         run_id = state["run_id"]
+        alert = state["alert"]
+        known_services = state["known_services"]
         node_start = datetime.now(UTC)
         decisions: dict[str, str | None] = {}
         edited_args: dict[str, dict[str, Any]] = {}
@@ -191,7 +208,13 @@ def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> A
                 decisions[call_id] = None  # unknown tool -> let registry.execute say so
                 continue
 
-            decision = decide(role, tool)
+            service = tool_call["args"].get("service")
+            in_scope = (
+                is_in_scope(service, alert_text=alert, known_services=known_services)
+                if tool.risk == "destructive" and service is not None
+                else True
+            )
+            decision = decide(role, tool, in_scope=in_scope)
             if isinstance(decision, Allow):
                 decisions[call_id] = None
                 continue
@@ -266,6 +289,7 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
         last_signature = state["last_tool_signature"]
         repeat_count = state["repeat_count"]
         nudged_for_stuck = state["nudged_for_stuck"]
+        known_services = list(state["known_services"])
 
         for tool_call in last.tool_calls:
             name = tool_call["name"]
@@ -281,6 +305,7 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
                 nudged_for_stuck = False
             last_signature = signature
 
+            tool = registry.get(name) if name in registry else None
             denial_reason = decisions.get(call_id)
             async with tracer.span(
                 "tool_call", name, tool=name, args=redact_if_large(args)
@@ -295,12 +320,43 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
                 if not result.ok:
                     handle.status = "error"
 
+                # [HARNESS:GUARD] Detection is a signal only -- see
+                # guardrails.detect_prompt_injection's WHY. Recorded while
+                # still inside the open tool_call span so it nests as a
+                # child of it (react_raw.py's post-hoc reconstruction can't
+                # do that -- its guardrail span is a sibling instead).
+                injection_patterns = detect_prompt_injection(result.content)
+                if injection_patterns:
+                    handle.set_attr("injection_patterns", injection_patterns)
+                    await tracer.record_span(
+                        "guardrail",
+                        name,
+                        start=datetime.now(UTC),
+                        duration_ms=0.0,
+                        tool=name,
+                        patterns=injection_patterns,
+                    )
+
+            service = args.get("service")
+            if (
+                tool is not None
+                and tool.risk == "read"
+                and result.ok
+                and service
+                and service not in known_services
+            ):
+                known_services.append(service)
+
+            framed_content = frame_tool_output(name, result.content)
+            if injection_patterns:
+                framed_content = f"{INJECTION_WARNING}\n{framed_content}"
+
             tool_call_records.append(
                 {"name": name, "input": args, "ok": result.ok, "content": result.content}
             )
             tool_messages.append(
                 ToolMessage(
-                    content=result.content,
+                    content=framed_content,
                     tool_call_id=call_id,
                     status="error" if not result.ok else "success",
                 )
@@ -309,7 +365,6 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
             # Mirrors Day 1: a terminal tool only ends the run if it
             # actually succeeded (invalid submit_report args -> ok=False ->
             # not terminal -> model gets a chance to self-correct).
-            tool = registry.get(name) if name in registry else None
             if tool is not None and tool.risk == "terminal" and result.ok:
                 outcome = "completed" if name == "submit_report" else "escalated"
                 report = result.data
@@ -338,6 +393,7 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
             "nudged_for_stuck": nudged_for_stuck,
             "outcome": outcome,
             "report": report,
+            "known_services": known_services,
         }
 
     return tools_node
@@ -503,6 +559,8 @@ async def run_react_graph(
         "policy_edited_args": None,
         "role": role,
         "run_id": run_id,
+        "alert": alert,
+        "known_services": [],
         "last_tool_signature": None,
         "repeat_count": 0,
         "nudged_for_stuck": False,

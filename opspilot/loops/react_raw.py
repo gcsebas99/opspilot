@@ -9,6 +9,12 @@ from opspilot.config import Settings
 from opspilot.context.assembler import build_initial_messages, build_system_blocks
 from opspilot.env.sandbox import Sandbox
 from opspilot.models.base import ContentBlock, ModelClient, TextBlock, ToolUseBlock
+from opspilot.policy.guardrails import (
+    INJECTION_WARNING,
+    detect_prompt_injection,
+    frame_tool_output,
+    is_in_scope,
+)
 from opspilot.policy.permissions import Allow, Role, decide
 from opspilot.tools.base import ToolRegistry, ToolResult
 
@@ -98,6 +104,13 @@ async def run_react_loop(
     last_signature: tuple[str, str] | None = None
     repeat_count = 0
     nudged_for_stuck = False
+    # [HARNESS:GUARD] Services a *successful read tool call* has actually
+    # touched this run -- the "evidence" half of the scope check
+    # (guardrails.is_in_scope). Only grown from reads that succeeded, never
+    # from a destructive attempt (blocked or not): otherwise an attacker
+    # could "unlock" an out-of-scope service by trying a blocked destructive
+    # call once, then repeating it now that it's in known_services.
+    known_services: set[str] = set()
 
     def emit(event_type: EventType, **data: Any) -> None:
         if on_event is not None:
@@ -226,12 +239,30 @@ async def run_react_loop(
             if tool is None:
                 result = registry.execute(block.name, block.input, sandbox)
             else:
-                decision = decide(role, tool)
+                service = block.input.get("service")
+                in_scope = (
+                    is_in_scope(service, alert_text=alert, known_services=known_services)
+                    if tool.risk == "destructive" and service is not None
+                    else True
+                )
+                decision = decide(role, tool, in_scope=in_scope)
                 if isinstance(decision, Allow):
                     result = registry.execute(block.name, block.input, sandbox)
                 else:
                     result = ToolResult(ok=False, content=decision.reason)
+                if tool.risk == "read" and result.ok and service:
+                    known_services.add(service)
             tool_duration_ms = (time.monotonic() - tool_start) * 1000
+
+            # [HARNESS:GUARD] Detection is a signal only -- see
+            # guardrails.detect_prompt_injection's WHY. Framing
+            # (frame_tool_output) applies to every tool result regardless of
+            # a match, labeling it as untrusted data in the transcript
+            # itself; the warning line is prepended only when a pattern hit.
+            injection_patterns = detect_prompt_injection(result.content)
+            framed_content = frame_tool_output(block.name, result.content)
+            if injection_patterns:
+                framed_content = f"{INJECTION_WARNING}\n{framed_content}"
 
             # Emitted after execution (not before, as in earlier Day 1 code)
             # so observability consumers (2.2) get real duration/result data
@@ -245,6 +276,7 @@ async def run_react_loop(
                 duration_ms=tool_duration_ms,
                 truncated=result.truncated,
                 output_size=len(result.content),
+                injection_patterns=injection_patterns,
             )
 
             tool_calls.append(
@@ -256,7 +288,7 @@ async def run_react_loop(
                 {
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": result.content,
+                    "content": framed_content,
                     "is_error": not result.ok,
                 }
             )

@@ -5,11 +5,24 @@ from opspilot.tools.base import Tool, ToolResult
 
 
 class SubmitReportInput(BaseModel):
+    # [HARNESS:GUARD] Output guardrail -- structure, not content, is what
+    # pydantic can actually enforce. WHY: this can't tell a correct root
+    # cause from a wrong one, but it can reject the shapes that make a
+    # report useless downstream (evals, on-call): a label that doesn't
+    # match any known category:service:detail scheme, or a claim with zero
+    # supporting evidence. A validation failure becomes a normal (ok=False)
+    # tool result -- the model reads it and retries, the same
+    # self-correction path as any other tool's bad-args error.
     root_cause: str = Field(
-        description="Concise root cause label, e.g. 'config_change:checkout:db_pool_size'."
+        pattern=r"^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*){0,2}$",
+        description=(
+            "Concise root cause label, e.g. 'config_change:checkout:db_pool_size' "
+            "(1-3 lowercase, ':'-separated segments), or 'no_incident'."
+        ),
     )
     evidence: list[str] = Field(
-        description="Specific observations backing the root cause (log lines, metrics, diffs)."
+        min_length=1,
+        description="Specific observations backing the root cause (log lines, metrics, diffs).",
     )
     actions_taken: list[str] = Field(
         default_factory=list, description="Tool calls actually made to fix the issue, if any."

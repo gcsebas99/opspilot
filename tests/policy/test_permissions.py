@@ -71,3 +71,29 @@ def test_allow_carries_no_reason() -> None:
     decision = decide("admin", _tool("destructive"))
 
     assert decision == Allow()
+
+
+def test_out_of_scope_destructive_downgrades_admin_allow_to_require_approval() -> None:
+    decision = decide("admin", _tool("destructive", name="restart_service"), in_scope=False)
+
+    assert isinstance(decision, RequireApproval)
+    assert "restart_service" in decision.reason
+
+
+def test_in_scope_destructive_stays_allowed_for_admin() -> None:
+    decision = decide("admin", _tool("destructive"), in_scope=True)
+
+    assert decision == Allow()
+
+
+@pytest.mark.parametrize(("role", "risk"), sorted(_EXPECTED))
+def test_out_of_scope_never_loosens_the_base_matrix(role: Role, risk: Risk) -> None:
+    # Scope check only ever makes a decision stricter -- never looser than
+    # what the base role x risk matrix already grants.
+    in_scope_decision = decide(role, _tool(risk), in_scope=True)
+    out_of_scope_decision = decide(role, _tool(risk), in_scope=False)
+
+    if type(in_scope_decision) is Allow:
+        assert type(out_of_scope_decision) is not Deny
+    else:
+        assert type(out_of_scope_decision) is type(in_scope_decision)

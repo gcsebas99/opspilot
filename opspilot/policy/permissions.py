@@ -47,8 +47,24 @@ _MATRIX: dict[Role, dict[Risk, _Outcome]] = {
 # in the system prompt?" -> because that's a request, not a constraint --
 # the model is a probabilistic text generator, not a security boundary.
 # Enforcement has to live in code the model's output can't reach.
-def decide(role: Role, tool: Tool) -> Decision:
+def decide(role: Role, tool: Tool, *, in_scope: bool = True) -> Decision:
     outcome = _MATRIX[role][tool.risk]
+
+    # [HARNESS:GUARD] Scope check -- see opspilot/policy/guardrails.is_in_scope.
+    # WHY: this is the actual enforcement half of prompt-injection defense;
+    # detection (guardrails.detect_prompt_injection) is only a signal and
+    # can miss a novel phrasing. This can't be talked past by phrasing at
+    # all -- it never sees the prompt text that got the model to target a
+    # service, only which service `in_scope` says it's allowed to touch.
+    # Only ever makes the outcome stricter (allow -> require_approval),
+    # matching the spec: out-of-scope destructive actions need approval
+    # even for admin.
+    if tool.risk == "destructive" and not in_scope and outcome == "allow":
+        return RequireApproval(
+            f"{tool.name!r} targets a service not named in the alert or investigated yet "
+            "this run; out-of-scope destructive actions require approval even for admin."
+        )
+
     if outcome == "allow":
         return Allow()
     if outcome == "deny":

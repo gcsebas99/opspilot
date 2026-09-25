@@ -63,4 +63,19 @@ async def record_loop_spans(
                 truncated=event.data["truncated"],
                 output_size=event.data["output_size"],
             )
+            # [HARNESS:GUARD] A sibling of the tool_call span (this whole
+            # reconstruction is flat, one level under "run" -- see this
+            # module's WHY above), not nested under it -- the graph
+            # strategy nests it instead, since its spans are written live
+            # inside an open tool_call context. Same signal, two shapes.
+            injection_patterns = event.data.get("injection_patterns") or []
+            if injection_patterns:
+                await tracer.record_span(
+                    "guardrail",
+                    event.data["name"],
+                    start=cursor,
+                    duration_ms=0.0,
+                    tool=event.data["name"],
+                    patterns=injection_patterns,
+                )
             cursor += timedelta(milliseconds=duration_ms)
