@@ -21,6 +21,7 @@ from opspilot.observability.instrumentation import record_loop_spans
 from opspilot.observability.metrics import build_dashboard, run_summary
 from opspilot.observability.pricing import cost_usd
 from opspilot.observability.tracer import Tracer
+from opspilot.policy.permissions import Role as PermRole
 from opspilot.store.base import Store
 from opspilot.store.factory import build_store
 from opspilot.store.models import RunDoc, SpanDoc
@@ -85,8 +86,8 @@ def run(
         ..., "--scenario", help="Scenario name, e.g. checkout_pool_exhaustion."
     ),
     seed: int = typer.Option(42, "--seed", help="RNG seed for the sandbox."),
-    allow_destructive: bool = typer.Option(
-        False, "--allow-destructive", help="Permit destructive tools (restart/rollback)."
+    role: str = typer.Option(
+        "viewer", "--role", help="Permission role: viewer (safe), operator, or admin."
     ),
     max_steps: int | None = typer.Option(None, "--max-steps", help="Override OPSPILOT_MAX_STEPS."),
     strategy: str = typer.Option(
@@ -97,13 +98,16 @@ def run(
     if strategy not in ("raw", "graph"):
         console.print(f"[red]--strategy must be 'raw' or 'graph', got {strategy!r}[/red]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_async(scenario, seed, allow_destructive, max_steps, strategy))  # type: ignore[arg-type]
+    if role not in ("viewer", "operator", "admin"):
+        console.print(f"[red]--role must be 'viewer', 'operator', or 'admin', got {role!r}[/red]")
+        raise typer.Exit(code=1)
+    asyncio.run(_run_async(scenario, seed, role, max_steps, strategy))  # type: ignore[arg-type]
 
 
 async def _run_async(
     scenario_name: str,
     seed: int,
-    allow_destructive: bool,
+    role: PermRole,
     max_steps: int | None,
     strategy: Literal["raw", "graph"],
 ) -> None:
@@ -132,9 +136,6 @@ async def _run_async(
     await store.ensure_indexes()
     run_id = str(uuid.uuid4())
     tracer = Tracer(store, run_id=run_id)
-    # --role (viewer/operator/admin) lands properly in 2.4's permission
-    # policy; this is a placeholder mapping so RunDoc has something sane.
-    role = "operator" if allow_destructive else "viewer"
 
     await store.insert_run(
         RunDoc(
@@ -167,7 +168,7 @@ async def _run_async(
                 sandbox=sandbox,
                 alert=scn.alert_text,
                 settings=settings,
-                allow_destructive=allow_destructive,
+                role=role,
                 max_steps=max_steps,
                 on_event=on_event,
             )
@@ -199,7 +200,6 @@ async def _run_async(
                     checkpointer=checkpointer,
                     run_id=run_id,
                     role=role,
-                    allow_destructive=allow_destructive,
                     max_steps=max_steps,
                 )
         finally:

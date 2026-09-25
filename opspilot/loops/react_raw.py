@@ -9,6 +9,7 @@ from opspilot.config import Settings
 from opspilot.context.assembler import build_initial_messages, build_system_blocks
 from opspilot.env.sandbox import Sandbox
 from opspilot.models.base import ContentBlock, ModelClient, TextBlock, ToolUseBlock
+from opspilot.policy.permissions import Allow, Role, decide
 from opspilot.tools.base import ToolRegistry, ToolResult
 
 Outcome = Literal["completed", "escalated", "max_steps", "budget_exceeded", "stuck", "no_report"]
@@ -62,7 +63,7 @@ async def run_react_loop(
     sandbox: Sandbox,
     alert: str,
     settings: Settings,
-    allow_destructive: bool = False,
+    role: Role = "viewer",
     max_steps: int | None = None,
     on_event: Callable[[LoopEvent], None] | None = None,
 ) -> RunResult:
@@ -201,13 +202,19 @@ async def run_react_loop(
 
             tool_start = time.monotonic()
             tool = registry.get(block.name) if block.name in registry else None
-            if tool is not None and tool.risk == "destructive" and not allow_destructive:
-                result = ToolResult(
-                    ok=False,
-                    content=f"tool {block.name!r} is destructive and requires --allow-destructive",
-                )
-            else:
+            # [HARNESS:PERM] Enforcement point: a decision from decide() is
+            # a block, not a suggestion -- the model never sees the policy
+            # table, only the tool_result it produces. See
+            # opspilot/policy/permissions.py for why this lives here and
+            # not in the prompt.
+            if tool is None:
                 result = registry.execute(block.name, block.input, sandbox)
+            else:
+                decision = decide(role, tool)
+                if isinstance(decision, Allow):
+                    result = registry.execute(block.name, block.input, sandbox)
+                else:
+                    result = ToolResult(ok=False, content=decision.reason)
             tool_duration_ms = (time.monotonic() - tool_start) * 1000
 
             # Emitted after execution (not before, as in earlier Day 1 code)

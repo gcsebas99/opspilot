@@ -227,7 +227,7 @@ async def test_graph_parallel_tool_calls(
     assert [tc.name for tc in result.tool_calls[:2]] == ["list_services", "read_config"]
 
 
-async def test_graph_destructive_tool_denied_without_allow_destructive(
+async def test_graph_destructive_tool_denied_for_viewer(
     sandbox: Sandbox, registry: ToolRegistry, settings: Settings
 ) -> None:
     restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
@@ -244,16 +244,43 @@ async def test_graph_destructive_tool_denied_without_allow_destructive(
         tracer=tracer,
         checkpointer=InMemorySaver(),
         run_id="test-run",
-        allow_destructive=False,
+        role="viewer",
     )
 
     assert result.tool_calls[0].name == "restart_service"
     assert result.tool_calls[0].ok is False
-    assert "--allow-destructive" in result.tool_calls[0].content
+    assert "viewer role cannot run" in result.tool_calls[0].content
     assert result.outcome == "escalated"
 
 
-async def test_graph_destructive_tool_allowed_with_flag(
+async def test_graph_destructive_tool_requires_approval_for_operator(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    # 2.5 wires real interrupt/resume for this; for now RequireApproval
+    # blocks like Deny, with a message that says why.
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    escalate = _tool_call_message("escalate", {"reason": "denied"}, call_id="b")
+    model = FakeMessagesListChatModel(responses=[restart, escalate])
+    tracer, _store = _tracer()
+
+    result = await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        tracer=tracer,
+        checkpointer=InMemorySaver(),
+        run_id="test-run",
+        role="operator",
+    )
+
+    assert result.tool_calls[0].ok is False
+    assert "requires human approval" in result.tool_calls[0].content
+    assert result.outcome == "escalated"
+
+
+async def test_graph_destructive_tool_allowed_for_admin(
     sandbox: Sandbox, registry: ToolRegistry, settings: Settings
 ) -> None:
     restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
@@ -270,7 +297,7 @@ async def test_graph_destructive_tool_allowed_with_flag(
         tracer=tracer,
         checkpointer=InMemorySaver(),
         run_id="test-run",
-        allow_destructive=True,
+        role="admin",
     )
 
     assert result.tool_calls[0].ok is True

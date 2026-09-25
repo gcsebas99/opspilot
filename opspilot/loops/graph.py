@@ -16,6 +16,7 @@ from opspilot.context.assembler import build_system_blocks
 from opspilot.env.sandbox import Sandbox
 from opspilot.loops.react_raw import RunResult, TokenTotals, ToolCallRecord
 from opspilot.observability.tracer import Tracer, redact_if_large
+from opspilot.policy.permissions import Allow, Role, decide
 from opspilot.tools.base import ToolRegistry, ToolResult
 
 _MARK_MAX_STEPS = "mark_max_steps"
@@ -32,8 +33,11 @@ class AgentState(TypedDict):
     # Unused until 2.5 wires real interrupt()/Command HITL -- kept in the
     # schema now so that sub-task doesn't need a state migration.
     pending_action: dict[str, Any] | None
-    policy_decisions: dict[str, bool] | None
-    role: str
+    # None = allowed; a string = blocked, and is the tool_result content
+    # the model sees (works for both Deny and the interim RequireApproval
+    # behavior -- see opspilot/policy/permissions.py).
+    policy_decisions: dict[str, str | None] | None
+    role: Role
     run_id: str
     last_tool_signature: tuple[str, str] | None
     repeat_count: int
@@ -144,23 +148,29 @@ async def _nudge_and_retry_node(state: AgentState) -> dict[str, Any]:
     return {"messages": [nudge], "no_tool_call_strikes": state["no_tool_call_strikes"] + 1}
 
 
-def _make_policy_node(registry: ToolRegistry, allow_destructive: bool, tracer: Tracer) -> Any:
-    # [HARNESS:PERM] Same minimal stub as Day 1's --allow-destructive flag,
-    # now living in its own graph node -- 2.4 replaces this node's body
-    # with the real permission policy, without changing the graph's shape.
+def _make_policy_node(registry: ToolRegistry, tracer: Tracer) -> Any:
+    # [HARNESS:PERM] Real permission policy, replacing 2.3's Day-1-parity
+    # stub. Role comes from state (set once, for the whole run) rather than
+    # a closure param, consistent with "everything flows through state" --
+    # see opspilot/policy/permissions.py for why this table, not the
+    # prompt, is the actual enforcement point.
     async def policy_node(state: AgentState) -> dict[str, Any]:
         last = state["messages"][-1]
         if not isinstance(last, AIMessage):
             raise TypeError(f"expected AIMessage with tool_calls, got {type(last).__name__}")
-        decisions: dict[str, bool] = {}
-        async with tracer.span("policy_check", "policy", step=state["step"]) as handle:
+        role = state["role"]
+        decisions: dict[str, str | None] = {}
+        async with tracer.span("policy_check", "policy", step=state["step"], role=role) as handle:
             for tool_call in last.tool_calls:
                 call_id = tool_call["id"]
                 if call_id is None:
                     raise ValueError(f"tool_call for {tool_call['name']!r} is missing an id")
                 tool = registry.get(tool_call["name"]) if tool_call["name"] in registry else None
-                denied = tool is not None and tool.risk == "destructive" and not allow_destructive
-                decisions[call_id] = not denied
+                if tool is None:
+                    decisions[call_id] = None  # unknown tool -> let registry.execute say so
+                else:
+                    decision = decide(role, tool)
+                    decisions[call_id] = None if isinstance(decision, Allow) else decision.reason
             handle.set_attr("decisions", decisions)
         return {"policy_decisions": decisions, "no_tool_call_strikes": 0}
 
@@ -193,15 +203,12 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
                 nudged_for_stuck = False
             last_signature = signature
 
-            allowed = decisions.get(call_id, True)
+            denial_reason = decisions.get(call_id)
             async with tracer.span(
                 "tool_call", name, tool=name, args=redact_if_large(args)
             ) as handle:
-                if not allowed:
-                    result = ToolResult(
-                        ok=False,
-                        content=f"tool {name!r} is destructive and requires --allow-destructive",
-                    )
+                if denial_reason is not None:
+                    result = ToolResult(ok=False, content=denial_reason)
                 else:
                     result = registry.execute(name, args, sandbox)
                 handle.set_attr("ok", result.ok)
@@ -291,7 +298,6 @@ def build_graph(
     sandbox: Sandbox,
     settings: Settings,
     tracer: Tracer,
-    allow_destructive: bool = False,
     max_steps: int | None = None,
     checkpointer: BaseCheckpointSaver[Any],
 ) -> Any:
@@ -301,7 +307,7 @@ def build_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", _make_agent_node(model, tracer))
     graph.add_node("nudge_and_retry", _nudge_and_retry_node)
-    graph.add_node("policy", _make_policy_node(registry, allow_destructive, tracer))
+    graph.add_node("policy", _make_policy_node(registry, tracer))
     graph.add_node("tools", _make_tools_node(registry, sandbox, tracer))
     graph.add_node(_MARK_MAX_STEPS, _mark("max_steps"))
     graph.add_node(_MARK_BUDGET_EXCEEDED, _mark("budget_exceeded"))
@@ -348,8 +354,7 @@ async def run_react_graph(
     tracer: Tracer,
     checkpointer: BaseCheckpointSaver[Any],
     run_id: str,
-    role: str = "viewer",
-    allow_destructive: bool = False,
+    role: Role = "viewer",
     max_steps: int | None = None,
 ) -> RunResult:
     """Build and run the graph once, returning the same RunResult shape as
@@ -362,7 +367,6 @@ async def run_react_graph(
         sandbox=sandbox,
         settings=settings,
         tracer=tracer,
-        allow_destructive=allow_destructive,
         max_steps=max_steps,
         checkpointer=checkpointer,
     )

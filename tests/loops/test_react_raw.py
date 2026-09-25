@@ -233,10 +233,10 @@ async def test_parallel_tool_calls_all_execute_and_share_one_message(
     assert tool_use_ids == {"a", "b"}
 
 
-# --- Permission stub ---
+# --- Permissions (2.4) ---
 
 
-async def test_destructive_tool_denied_without_allow_destructive(
+async def test_destructive_tool_denied_for_viewer(
     sandbox: Sandbox, registry: ToolRegistry, settings: Settings
 ) -> None:
     restart = _tool_use("restart_service", {"service": "checkout"}, tool_use_id="a")
@@ -249,16 +249,39 @@ async def test_destructive_tool_denied_without_allow_destructive(
         sandbox=sandbox,
         alert="x",
         settings=settings,
-        allow_destructive=False,
+        role="viewer",
     )
 
     assert result.tool_calls[0].name == "restart_service"
     assert result.tool_calls[0].ok is False
-    assert "--allow-destructive" in result.tool_calls[0].content
+    assert "viewer role cannot run" in result.tool_calls[0].content
     assert result.outcome == "escalated"
 
 
-async def test_destructive_tool_allowed_with_flag(
+async def test_destructive_tool_requires_approval_for_operator(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    # 2.5 wires real interrupt/resume for this; for now RequireApproval
+    # blocks like Deny, with a message that says why.
+    restart = _tool_use("restart_service", {"service": "checkout"}, tool_use_id="a")
+    escalate = _tool_use("escalate", {"reason": "denied"}, tool_use_id="b")
+    model = ScriptedModel([restart, escalate])
+
+    result = await run_react_loop(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        role="operator",
+    )
+
+    assert result.tool_calls[0].ok is False
+    assert "requires human approval" in result.tool_calls[0].content
+    assert result.outcome == "escalated"
+
+
+async def test_destructive_tool_allowed_for_admin(
     sandbox: Sandbox, registry: ToolRegistry, settings: Settings
 ) -> None:
     restart = _tool_use("restart_service", {"service": "checkout"}, tool_use_id="a")
@@ -271,7 +294,7 @@ async def test_destructive_tool_allowed_with_flag(
         sandbox=sandbox,
         alert="x",
         settings=settings,
-        allow_destructive=True,
+        role="admin",
     )
 
     assert result.tool_calls[0].name == "restart_service"
