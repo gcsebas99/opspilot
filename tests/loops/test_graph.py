@@ -1,10 +1,11 @@
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolCall
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opspilot.config import Settings
 from opspilot.env.sandbox import Sandbox
-from opspilot.loops.graph import run_react_graph
+from opspilot.loops.graph import resume_react_graph, run_react_graph
 from opspilot.observability.tracer import Tracer
 from opspilot.store.memory import MemoryStore
 from opspilot.tools.base import ToolRegistry
@@ -19,7 +20,7 @@ _REPORT_INPUT = {
 
 
 def _tool_call_message(
-    name: str, args: dict, call_id: str = "call_1", usage: dict | None = None
+    name: str, args: dict[str, object], call_id: str = "call_1", usage: dict[str, int] | None = None
 ) -> AIMessage:
     return AIMessage(
         content="",
@@ -28,7 +29,7 @@ def _tool_call_message(
     )
 
 
-def _parallel_tool_call_message(calls: list[tuple[str, dict, str]]) -> AIMessage:
+def _parallel_tool_call_message(calls: list[tuple[str, dict[str, object], str]]) -> AIMessage:
     return AIMessage(
         content="",
         tool_calls=[ToolCall(name=name, args=args, id=call_id) for name, args, call_id in calls],
@@ -62,6 +63,7 @@ async def test_graph_reaches_submit_report(
         alert="checkout latency spiking",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -84,7 +86,7 @@ async def test_graph_reaches_escalate(
     model = FakeMessagesListChatModel(
         responses=[_tool_call_message("escalate", {"reason": "disk full, no safe tool fixes it"})]
     )
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -93,6 +95,7 @@ async def test_graph_reaches_escalate(
         alert="db disk full",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -110,7 +113,7 @@ async def test_graph_max_steps(
     model = FakeMessagesListChatModel(
         responses=[_tool_call_message("list_services", {}) for _ in range(3)]
     )
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -119,6 +122,7 @@ async def test_graph_max_steps(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -136,7 +140,7 @@ async def test_graph_budget_exceeded(
         usage_metadata={"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500},
     )
     model = FakeMessagesListChatModel(responses=[expensive])
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -145,6 +149,7 @@ async def test_graph_budget_exceeded(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -159,7 +164,7 @@ async def test_graph_no_report_after_two_plain_text_turns(
     model = FakeMessagesListChatModel(
         responses=[_plain_text_message("I'm not sure what to do next.") for _ in range(2)]
     )
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -168,6 +173,7 @@ async def test_graph_no_report_after_two_plain_text_turns(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -185,7 +191,7 @@ async def test_graph_stuck_detection(
             for _ in range(4)
         ]
     )
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -194,6 +200,7 @@ async def test_graph_stuck_detection(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -210,7 +217,7 @@ async def test_graph_parallel_tool_calls(
     )
     submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="c")
     model = FakeMessagesListChatModel(responses=[parallel, submit])
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -219,6 +226,7 @@ async def test_graph_parallel_tool_calls(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
     )
@@ -233,7 +241,7 @@ async def test_graph_destructive_tool_denied_for_viewer(
     restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
     escalate = _tool_call_message("escalate", {"reason": "denied"}, call_id="b")
     model = FakeMessagesListChatModel(responses=[restart, escalate])
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -242,6 +250,7 @@ async def test_graph_destructive_tool_denied_for_viewer(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
         role="viewer",
@@ -253,40 +262,13 @@ async def test_graph_destructive_tool_denied_for_viewer(
     assert result.outcome == "escalated"
 
 
-async def test_graph_destructive_tool_requires_approval_for_operator(
-    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
-) -> None:
-    # 2.5 wires real interrupt/resume for this; for now RequireApproval
-    # blocks like Deny, with a message that says why.
-    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
-    escalate = _tool_call_message("escalate", {"reason": "denied"}, call_id="b")
-    model = FakeMessagesListChatModel(responses=[restart, escalate])
-    tracer, _store = _tracer()
-
-    result = await run_react_graph(
-        model=model,
-        registry=registry,
-        sandbox=sandbox,
-        alert="x",
-        settings=settings,
-        tracer=tracer,
-        checkpointer=InMemorySaver(),
-        run_id="test-run",
-        role="operator",
-    )
-
-    assert result.tool_calls[0].ok is False
-    assert "requires human approval" in result.tool_calls[0].content
-    assert result.outcome == "escalated"
-
-
 async def test_graph_destructive_tool_allowed_for_admin(
     sandbox: Sandbox, registry: ToolRegistry, settings: Settings
 ) -> None:
     restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
     submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="b")
     model = FakeMessagesListChatModel(responses=[restart, submit])
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
 
     result = await run_react_graph(
         model=model,
@@ -295,6 +277,7 @@ async def test_graph_destructive_tool_allowed_for_admin(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
         role="admin",
@@ -310,7 +293,7 @@ async def test_graph_checkpointer_persists_thread_state(
     model = FakeMessagesListChatModel(
         responses=[_tool_call_message("submit_report", _REPORT_INPUT)]
     )
-    tracer, _store = _tracer()
+    tracer, store = _tracer()
     checkpointer = InMemorySaver()
 
     await run_react_graph(
@@ -320,9 +303,224 @@ async def test_graph_checkpointer_persists_thread_state(
         alert="x",
         settings=settings,
         tracer=tracer,
+        store=store,
         checkpointer=checkpointer,
         run_id="thread-42",
     )
 
     checkpoints = list(checkpointer.list({"configurable": {"thread_id": "thread-42"}}))
     assert len(checkpoints) > 0
+
+
+# --- HITL: RequireApproval pauses via interrupt(), resumes via Command (2.5) ---
+
+
+async def test_graph_operator_destructive_pauses_for_approval(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    model = FakeMessagesListChatModel(responses=[restart])
+    tracer, store = _tracer()
+
+    result = await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=InMemorySaver(),
+        run_id="test-run",
+        role="operator",
+    )
+
+    assert result.outcome == "awaiting_approval"
+    assert result.pending_approval is not None
+    assert result.pending_approval["tool"] == "restart_service"
+    assert result.pending_approval["approval_id"] == "test-run:a"
+
+    approval = await store.get_approval("test-run:a")
+    assert approval is not None
+    assert approval.status == "pending"
+    assert approval.tool == "restart_service"
+
+
+async def test_graph_resume_approve_executes_tool(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="b")
+    model = FakeMessagesListChatModel(responses=[restart, submit])
+    tracer, store = _tracer()
+    checkpointer = InMemorySaver()
+
+    paused = await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        role="operator",
+    )
+    assert paused.outcome == "awaiting_approval"
+
+    result = await resume_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        decision={"decision": "approve", "approver": "alice"},
+    )
+
+    assert result.outcome == "completed"
+    assert result.tool_calls[0].name == "restart_service"
+    assert result.tool_calls[0].ok is True
+
+    approval = await store.get_approval("test-run:a")
+    assert approval is not None
+    assert approval.status == "approved"
+    assert approval.approver == "alice"
+    assert approval.decided_at is not None
+
+    spans = await store.list_spans("test-run")
+    assert "approval_wait" in [s.kind for s in spans]
+
+
+async def test_graph_resume_reject_tool_not_executed_model_informed(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    escalate = _tool_call_message("escalate", {"reason": "rejected, escalating"}, call_id="b")
+    model = FakeMessagesListChatModel(responses=[restart, escalate])
+    tracer, store = _tracer()
+    checkpointer = InMemorySaver()
+
+    paused = await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        role="operator",
+    )
+    assert paused.outcome == "awaiting_approval"
+
+    result = await resume_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        decision={"decision": "reject", "reason": "not safe right now", "approver": "alice"},
+    )
+
+    # tool not executed -- ok=False, and the rejection reason is exactly
+    # what becomes the ToolMessage the model sees on its next turn.
+    assert result.tool_calls[0].name == "restart_service"
+    assert result.tool_calls[0].ok is False
+    assert "rejected" in result.tool_calls[0].content.lower()
+    assert "not safe right now" in result.tool_calls[0].content
+    # the model, informed of the rejection, escalated instead (its scripted
+    # next response) -- proof the run actually continued past the rejection.
+    assert result.outcome == "escalated"
+
+    approval = await store.get_approval("test-run:a")
+    assert approval is not None
+    assert approval.status == "rejected"
+
+
+async def test_graph_resume_edit_uses_edited_args(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    rollback = _tool_call_message(
+        "rollback_config", {"service": "checkout", "version": 999}, call_id="a"
+    )
+    submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="b")
+    model = FakeMessagesListChatModel(responses=[rollback, submit])
+    tracer, store = _tracer()
+    checkpointer = InMemorySaver()
+
+    await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        role="operator",
+    )
+
+    result = await resume_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        decision={
+            "decision": "edit",
+            "args": {"service": "checkout", "version": 12},
+            "approver": "alice",
+        },
+    )
+
+    assert result.tool_calls[0].name == "rollback_config"
+    assert result.tool_calls[0].input == {"service": "checkout", "version": 12}
+    assert result.tool_calls[0].ok is True
+
+
+async def test_resume_without_pending_approval_raises(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    model = FakeMessagesListChatModel(
+        responses=[_tool_call_message("submit_report", _REPORT_INPUT)]
+    )
+    tracer, store = _tracer()
+    checkpointer = InMemorySaver()
+
+    await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="x",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        role="admin",
+    )
+
+    with pytest.raises(ValueError, match="no pending approval"):
+        await resume_react_graph(
+            model=model,
+            registry=registry,
+            sandbox=sandbox,
+            settings=settings,
+            tracer=tracer,
+            store=store,
+            checkpointer=checkpointer,
+            run_id="test-run",
+            decision={"decision": "approve", "approver": "alice"},
+        )

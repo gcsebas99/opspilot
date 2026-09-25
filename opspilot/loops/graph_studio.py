@@ -30,7 +30,8 @@ _chat_model = ChatAnthropic(
     model=_settings.opspilot_model, max_tokens=8192, api_key=_settings.anthropic_api_key
 )
 _bound_model = _chat_model.bind_tools(_registry.to_anthropic_schema())
-_tracer = Tracer(MemoryStore(), run_id="studio")
+_store = MemoryStore()
+_tracer = Tracer(_store, run_id="studio")
 
 GRAPH = build_graph(
     model=_bound_model,
@@ -38,5 +39,6 @@ GRAPH = build_graph(
     sandbox=_sandbox,
     settings=_settings,
     tracer=_tracer,
+    store=_store,
     checkpointer=InMemorySaver(),
 )

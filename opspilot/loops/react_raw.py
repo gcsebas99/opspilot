@@ -12,7 +12,15 @@ from opspilot.models.base import ContentBlock, ModelClient, TextBlock, ToolUseBl
 from opspilot.policy.permissions import Allow, Role, decide
 from opspilot.tools.base import ToolRegistry, ToolResult
 
-Outcome = Literal["completed", "escalated", "max_steps", "budget_exceeded", "stuck", "no_report"]
+Outcome = Literal[
+    "completed",
+    "escalated",
+    "max_steps",
+    "budget_exceeded",
+    "stuck",
+    "no_report",
+    "awaiting_approval",
+]
 EventType = Literal["step_start", "model_call", "tool_call", "exit"]
 
 
@@ -42,6 +50,9 @@ class RunResult(BaseModel):
     tokens: TokenTotals
     tool_calls: list[ToolCallRecord]
     sandbox_snapshot: dict[str, str]
+    # Set only when outcome == "awaiting_approval" (graph strategy only --
+    # see opspilot/loops/graph.py). The raw loop never produces this.
+    pending_approval: dict[str, Any] | None = None
 
 
 def _serialize_content(blocks: list[ContentBlock]) -> list[dict[str, Any]]:
@@ -206,7 +217,12 @@ async def run_react_loop(
             # a block, not a suggestion -- the model never sees the policy
             # table, only the tool_result it produces. See
             # opspilot/policy/permissions.py for why this lives here and
-            # not in the prompt.
+            # not in the prompt. RequireApproval is treated like Deny here,
+            # permanently -- this hand-written loop has no checkpointer to
+            # pause on, so it can't offer real HITL. The graph strategy
+            # (opspilot/loops/graph.py) implements the real interrupt/resume
+            # flow for RequireApproval (2.5); that's one of the concrete
+            # reasons this project ported to LangGraph in the first place.
             if tool is None:
                 result = registry.execute(block.name, block.input, sandbox)
             else:

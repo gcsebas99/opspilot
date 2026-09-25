@@ -13,8 +13,9 @@ from opspilot.config import get_settings
 from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.cli import app as env_app
 from opspilot.env.generator import build_sandbox
+from opspilot.env.sandbox import Sandbox
 from opspilot.env.scenarios import get_scenario
-from opspilot.loops.graph import build_checkpointer, run_react_graph
+from opspilot.loops.graph import build_checkpointer, resume_react_graph, run_react_graph
 from opspilot.loops.react_raw import LoopEvent, RunResult, run_react_loop
 from opspilot.models.anthropic_model import AnthropicModel
 from opspilot.observability.instrumentation import record_loop_spans
@@ -197,9 +198,43 @@ async def _run_async(
                     alert=scn.alert_text,
                     settings=settings,
                     tracer=tracer,
+                    store=store,
                     checkpointer=checkpointer,
                     run_id=run_id,
                     role=role,
+                    max_steps=max_steps,
+                )
+            # [HARNESS:HITL] The interactive half of the approval loop: the
+            # graph itself only pauses (outcome="awaiting_approval") and
+            # resumes (resume_react_graph) -- this is the one place a human
+            # actually decides, via a blocking prompt. `opspilot approve`
+            # below is the out-of-process equivalent for a different
+            # operator picking up a run started elsewhere.
+            while result.outcome == "awaiting_approval":
+                pending = result.pending_approval
+                assert pending is not None
+                console.print(
+                    f"\n[bold yellow]approval required:[/bold yellow] "
+                    f"{pending['tool']}({pending['args']})"
+                )
+                console.print(f"[dim]reason:[/dim] {pending['reason']}")
+                console.print(f"[dim]approval_id:[/dim] {pending['approval_id']}")
+                decision: dict[str, Any]
+                if typer.confirm("Approve this action?"):
+                    decision = {"decision": "approve", "approver": role}
+                else:
+                    reject_reason = typer.prompt("Rejection reason", default="")
+                    decision = {"decision": "reject", "approver": role, "reason": reject_reason}
+                result = await resume_react_graph(
+                    model=bound_model,
+                    registry=registry,
+                    sandbox=sandbox,
+                    settings=settings,
+                    tracer=tracer,
+                    store=store,
+                    checkpointer=checkpointer,
+                    run_id=run_id,
+                    decision=decision,
                     max_steps=max_steps,
                 )
         finally:
@@ -307,6 +342,133 @@ async def _metrics_async() -> None:
     console.print("[bold]Avg cost by scenario[/bold]")
     for scenario, avg in sorted(dashboard.avg_cost_by_scenario.items()):
         console.print(f"  {scenario}: ${avg:.4f}")
+
+
+approvals_app = typer.Typer(help="Inspect pending HITL approvals.")
+app.add_typer(approvals_app, name="approvals")
+
+
+@approvals_app.command("list")
+def approvals_list() -> None:
+    """List all pending approvals across runs."""
+    asyncio.run(_approvals_list_async())
+
+
+async def _approvals_list_async() -> None:
+    settings = get_settings()
+    store = build_store(settings)
+    pending = await store.list_pending_approvals()
+    if not pending:
+        console.print("[dim]no pending approvals[/dim]")
+        return
+    for approval in pending:
+        console.print(
+            f"[bold]{approval.approval_id}[/bold]  run={approval.run_id}  "
+            f"tool={approval.tool}({approval.args})"
+        )
+        console.print(f"  [dim]reason:[/dim] {approval.reason}")
+        console.print(f"  [dim]requested_at:[/dim] {approval.requested_at.isoformat()}")
+
+
+@app.command("approve")
+def approve(
+    approval_id: str = typer.Argument(
+        ..., help="Approval ID, e.g. from `opspilot approvals list`."
+    ),
+    reject: bool = typer.Option(False, "--reject", help="Reject instead of approve."),
+    reason: str = typer.Option("", "--reason", help="Reason (used when --reject)."),
+    approver: str = typer.Option("cli", "--approver", help="Name recorded as the approver."),
+) -> None:
+    """Resume a paused run by approving or rejecting its pending tool call."""
+    asyncio.run(_approve_async(approval_id, reject, reason, approver))
+
+
+async def _approve_async(approval_id: str, reject: bool, reason: str, approver: str) -> None:
+    settings = get_settings()
+    # [HARNESS:HITL] Cross-process resume needs a checkpointer the paused
+    # `opspilot run` process also wrote to -- InMemorySaver lives only in
+    # that process's memory, so a separate `opspilot approve` invocation can
+    # never see the paused thread there. Only MongoDBSaver persists across
+    # processes, which is why this command refuses to proceed without it.
+    if settings.opspilot_store != "mongo":
+        console.print(
+            "[red]opspilot approve requires OPSPILOT_STORE=mongo -- the paused run's "
+            "checkpoint only survives across processes in Mongo, never in memory.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    store = build_store(settings)
+    approval = await store.get_approval(approval_id)
+    if approval is None:
+        console.print(f"[red]no approval found with id {approval_id!r}[/red]")
+        raise typer.Exit(code=1)
+
+    run = await store.get_run(approval.run_id)
+    if run is None:
+        console.print(f"[red]no run found with id {approval.run_id!r}[/red]")
+        raise typer.Exit(code=1)
+
+    registry = build_default_registry(settings)
+    # Reconstruct the sandbox pointing at the paused run's already-mutated
+    # files -- build_sandbox() would regenerate the scenario from scratch
+    # and wipe whatever the run already did.
+    sandbox = Sandbox(root=Path("tmp/runs") / f"{run.scenario}-{run.seed}")
+
+    tracer = Tracer(store, run_id=run.run_id)
+    chat_model = ChatAnthropic(model=run.model, max_tokens=8192, api_key=settings.anthropic_api_key)
+    bound_model = chat_model.bind_tools(registry.to_anthropic_schema())
+    checkpointer, mongo_client = build_checkpointer(settings)
+
+    decision: dict[str, Any] = (
+        {"decision": "reject", "approver": approver, "reason": reason or "no reason given"}
+        if reject
+        else {"decision": "approve", "approver": approver}
+    )
+
+    try:
+        result = await resume_react_graph(
+            model=bound_model,
+            registry=registry,
+            sandbox=sandbox,
+            settings=settings,
+            tracer=tracer,
+            store=store,
+            checkpointer=checkpointer,
+            run_id=run.run_id,
+            decision=decision,
+        )
+    finally:
+        if mongo_client is not None:
+            mongo_client.close()
+
+    if result.outcome != "awaiting_approval":
+        total_cost = cost_usd(
+            run.model,
+            input_tokens=result.tokens.input_tokens,
+            output_tokens=result.tokens.output_tokens,
+            cache_creation_input_tokens=result.tokens.cache_creation_input_tokens,
+            cache_read_input_tokens=result.tokens.cache_read_input_tokens,
+        )
+        await store.update_run(
+            run.run_id,
+            {
+                "outcome": result.outcome,
+                "steps": result.steps,
+                "tokens": result.tokens.model_dump(),
+                "cost_usd": total_cost,
+                "finished_at": datetime.now(UTC),
+            },
+        )
+
+    _print_summary(result, run.run_id)
+    if result.outcome == "awaiting_approval":
+        pending = result.pending_approval
+        assert pending is not None
+        console.print(
+            f"\n[bold yellow]another approval is pending:[/bold yellow] "
+            f"{pending['approval_id']} -- run `opspilot approve {pending['approval_id']}` "
+            "to continue."
+        )
 
 
 if __name__ == "__main__":

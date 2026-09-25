@@ -14,7 +14,18 @@ class MongoStore:
     """
 
     def __init__(self, uri: str, db_name: str = "opspilot") -> None:
-        self._client: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(uri)
+        # [HARNESS:HITL] tz_aware=True -- BSON has no timezone concept, so a
+        # naive client hands back naive datetimes for anything written as
+        # datetime.now(UTC) (every timestamp field here). That's silent
+        # until code actually subtracts one against a fresh aware
+        # datetime.now(UTC) -- exactly what resume_react_graph does to
+        # compute the approval_wait span duration (requested_at, read back
+        # from Mongo, vs. decided_at, freshly created) -- raising
+        # `TypeError: can't subtract offset-naive and offset-aware
+        # datetimes`. Caught by the live Mongo verification for 2.5, not by
+        # any test against MemoryStore (which never round-trips through BSON
+        # and so never loses tzinfo in the first place).
+        self._client: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(uri, tz_aware=True)
         self._db = self._client[db_name]
 
     async def close(self) -> None:

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pymongo import AsyncMongoClient
 
-from opspilot.store.models import RunDoc, SpanDoc
+from opspilot.store.models import ApprovalDoc, RunDoc, SpanDoc
 from opspilot.store.mongo import MongoStore
 
 MONGO_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
@@ -118,3 +118,32 @@ async def test_mongo_store_aggregations(store: MongoStore) -> None:
 
     avg_cost = await store.avg_cost_by_scenario()
     assert avg_cost["checkout_pool_exhaustion"] == pytest.approx(0.20)
+
+
+async def test_mongo_store_approval_datetimes_stay_tz_aware(store: MongoStore) -> None:
+    # Regression test: BSON has no timezone concept, so a client without
+    # tz_aware=True hands back naive datetimes for fields written as
+    # datetime.now(UTC). That's invisible until code subtracts one against
+    # a fresh aware datetime -- exactly what resume_react_graph does to
+    # compute the approval_wait span (requested_at, read back from Mongo,
+    # vs. decided_at, freshly created) -- raising `TypeError: can't
+    # subtract offset-naive and offset-aware datetimes`. Caught live
+    # against real Mongo during 2.5, not by MemoryStore-backed tests
+    # (which never round-trip through BSON and so never lose tzinfo).
+    requested_at = datetime.now(UTC)
+    await store.insert_approval(
+        ApprovalDoc(
+            approval_id="approval-tz-1",
+            run_id="run-tz-1",
+            tool="restart_service",
+            args={"service": "checkout"},
+            reason="requires approval",
+            requested_at=requested_at,
+        )
+    )
+
+    fetched = await store.get_approval("approval-tz-1")
+    assert fetched is not None
+
+    wait = datetime.now(UTC) - fetched.requested_at  # raises if naive
+    assert wait.total_seconds() >= 0

@@ -1,5 +1,6 @@
 import json
 import operator
+from datetime import UTC, datetime
 from typing import Annotated, Any, TypedDict, cast
 
 from langchain_core.language_models import LanguageModelLike
@@ -9,6 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import Command, interrupt
 from pymongo import MongoClient
 
 from opspilot.config import Settings
@@ -16,7 +18,9 @@ from opspilot.context.assembler import build_system_blocks
 from opspilot.env.sandbox import Sandbox
 from opspilot.loops.react_raw import RunResult, TokenTotals, ToolCallRecord
 from opspilot.observability.tracer import Tracer, redact_if_large
-from opspilot.policy.permissions import Allow, Role, decide
+from opspilot.policy.permissions import Allow, Deny, Role, decide
+from opspilot.store.base import Store
+from opspilot.store.models import ApprovalDoc
 from opspilot.tools.base import ToolRegistry, ToolResult
 
 _MARK_MAX_STEPS = "mark_max_steps"
@@ -30,13 +34,12 @@ class AgentState(TypedDict):
     tokens_used: dict[str, int]
     outcome: str | None
     report: dict[str, Any] | None
-    # Unused until 2.5 wires real interrupt()/Command HITL -- kept in the
-    # schema now so that sub-task doesn't need a state migration.
-    pending_action: dict[str, Any] | None
-    # None = allowed; a string = blocked, and is the tool_result content
-    # the model sees (works for both Deny and the interim RequireApproval
-    # behavior -- see opspilot/policy/permissions.py).
+    # None = allowed; a string = blocked (Deny, or a rejected RequireApproval),
+    # and is the tool_result content the model sees.
     policy_decisions: dict[str, str | None] | None
+    # Populated only for an approved RequireApproval with decision="edit" --
+    # tools node uses these args instead of the model's original ones.
+    policy_edited_args: dict[str, dict[str, Any]] | None
     role: Role
     run_id: str
     last_tool_signature: tuple[str, str] | None
@@ -148,31 +151,103 @@ async def _nudge_and_retry_node(state: AgentState) -> dict[str, Any]:
     return {"messages": [nudge], "no_tool_call_strikes": state["no_tool_call_strikes"] + 1}
 
 
-def _make_policy_node(registry: ToolRegistry, tracer: Tracer) -> Any:
-    # [HARNESS:PERM] Real permission policy, replacing 2.3's Day-1-parity
-    # stub. Role comes from state (set once, for the whole run) rather than
-    # a closure param, consistent with "everything flows through state" --
-    # see opspilot/policy/permissions.py for why this table, not the
-    # prompt, is the actual enforcement point.
+def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> Any:
+    # [HARNESS:HITL] RequireApproval pauses the run for a human, via
+    # interrupt(). WHY THIS SHAPE, VERIFIED EMPIRICALLY (not from docs
+    # alone): a node re-runs from the top on every resume, with each
+    # earlier interrupt() call in this same loop instantly replaying its
+    # cached resume value before reaching the next pending one. That means:
+    # (1) the ApprovalDoc insert must be guarded (check-then-insert) so a
+    # replay never resets an already-decided approval back to "pending",
+    # and (2) nothing here can be wrapped in `async with tracer.span(...)`
+    # around an interrupt() call -- the pausing pass would unwind through
+    # it (writing a bogus "error" span) and the resume pass would write a
+    # second, real one. Instead the policy_check span is written once, at
+    # the very end, which is only reached by the pass that completes
+    # without hitting a *new* interrupt.
+    # INTERVIEW: "How do you pause an agent for human approval and resume
+    # it later, possibly in a different process?" -> LangGraph interrupt()
+    # inside the graph node + a checkpointer (MongoDBSaver, so a different
+    # process can see the paused thread) + Command(resume=...) to continue;
+    # the approval decision itself is recorded in our own store (ApprovalDoc),
+    # not just LangGraph's checkpoint, so it survives independent of
+    # checkpoint retention and is queryable (`opspilot approvals list`).
     async def policy_node(state: AgentState) -> dict[str, Any]:
         last = state["messages"][-1]
         if not isinstance(last, AIMessage):
             raise TypeError(f"expected AIMessage with tool_calls, got {type(last).__name__}")
         role = state["role"]
+        run_id = state["run_id"]
+        node_start = datetime.now(UTC)
         decisions: dict[str, str | None] = {}
-        async with tracer.span("policy_check", "policy", step=state["step"], role=role) as handle:
-            for tool_call in last.tool_calls:
-                call_id = tool_call["id"]
-                if call_id is None:
-                    raise ValueError(f"tool_call for {tool_call['name']!r} is missing an id")
-                tool = registry.get(tool_call["name"]) if tool_call["name"] in registry else None
-                if tool is None:
-                    decisions[call_id] = None  # unknown tool -> let registry.execute say so
-                else:
-                    decision = decide(role, tool)
-                    decisions[call_id] = None if isinstance(decision, Allow) else decision.reason
-            handle.set_attr("decisions", decisions)
-        return {"policy_decisions": decisions, "no_tool_call_strikes": 0}
+        edited_args: dict[str, dict[str, Any]] = {}
+
+        for tool_call in last.tool_calls:
+            call_id = tool_call["id"]
+            if call_id is None:
+                raise ValueError(f"tool_call for {tool_call['name']!r} is missing an id")
+            tool = registry.get(tool_call["name"]) if tool_call["name"] in registry else None
+            if tool is None:
+                decisions[call_id] = None  # unknown tool -> let registry.execute say so
+                continue
+
+            decision = decide(role, tool)
+            if isinstance(decision, Allow):
+                decisions[call_id] = None
+                continue
+            if isinstance(decision, Deny):
+                decisions[call_id] = decision.reason
+                continue
+
+            # RequireApproval: pause for a human.
+            approval_id = f"{run_id}:{call_id}"
+            existing = await store.get_approval(approval_id)
+            if existing is None:
+                await store.insert_approval(
+                    ApprovalDoc(
+                        approval_id=approval_id,
+                        run_id=run_id,
+                        tool=tool.name,
+                        args=tool_call["args"],
+                        reason=decision.reason,
+                        status="pending",
+                        requested_at=datetime.now(UTC),
+                    )
+                )
+            resume = interrupt(
+                {
+                    "approval_id": approval_id,
+                    "tool": tool.name,
+                    "args": tool_call["args"],
+                    "reason": decision.reason,
+                }
+            )
+            if resume["decision"] == "reject":
+                approver = resume.get("approver") or "a human"
+                reject_reason = resume.get("reason") or "no reason given"
+                decisions[call_id] = f"Action rejected by {approver}: {reject_reason}"
+            else:
+                decisions[call_id] = None
+                if resume["decision"] == "edit":
+                    edited_args[call_id] = resume["args"]
+
+        # Only reached by the pass that completes without hitting a new
+        # interrupt -- see the WHY note above for why this can't be a
+        # context manager wrapping the loop.
+        duration_ms = (datetime.now(UTC) - node_start).total_seconds() * 1000
+        await tracer.record_span(
+            "policy_check",
+            "policy",
+            start=node_start,
+            duration_ms=duration_ms,
+            role=role,
+            decisions=decisions,
+        )
+        return {
+            "policy_decisions": decisions,
+            "policy_edited_args": edited_args,
+            "no_tool_call_strikes": 0,
+        }
 
     return policy_node
 
@@ -183,6 +258,7 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
         if not isinstance(last, AIMessage):
             raise TypeError(f"expected AIMessage with tool_calls, got {type(last).__name__}")
         decisions = state.get("policy_decisions") or {}
+        edited_args = state.get("policy_edited_args") or {}
         tool_messages: list[BaseMessage] = []
         tool_call_records: list[dict[str, Any]] = []
         outcome: str | None = None
@@ -193,10 +269,12 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
 
         for tool_call in last.tool_calls:
             name = tool_call["name"]
-            args = tool_call["args"]
             call_id = tool_call["id"]
             if call_id is None:
                 raise ValueError(f"tool_call for {name!r} is missing an id")
+            # A human editing the args during approval (decision="edit")
+            # takes precedence over what the model originally sent.
+            args = edited_args.get(call_id, tool_call["args"])
             signature = (name, json.dumps(args, sort_keys=True))
             repeat_count = repeat_count + 1 if signature == last_signature else 1
             if signature != last_signature:
@@ -298,6 +376,7 @@ def build_graph(
     sandbox: Sandbox,
     settings: Settings,
     tracer: Tracer,
+    store: Store,
     max_steps: int | None = None,
     checkpointer: BaseCheckpointSaver[Any],
 ) -> Any:
@@ -307,7 +386,7 @@ def build_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", _make_agent_node(model, tracer))
     graph.add_node("nudge_and_retry", _nudge_and_retry_node)
-    graph.add_node("policy", _make_policy_node(registry, tracer))
+    graph.add_node("policy", _make_policy_node(registry, tracer, store))
     graph.add_node("tools", _make_tools_node(registry, sandbox, tracer))
     graph.add_node(_MARK_MAX_STEPS, _mark("max_steps"))
     graph.add_node(_MARK_BUDGET_EXCEEDED, _mark("budget_exceeded"))
@@ -344,6 +423,37 @@ def build_graph(
     return graph.compile(checkpointer=checkpointer)
 
 
+def _finalize_or_pause(raw_result: dict[str, Any], sandbox: Sandbox) -> RunResult:
+    tokens = TokenTotals(**(raw_result.get("tokens_used") or {}))
+    tool_calls = [ToolCallRecord(**tc) for tc in raw_result.get("tool_call_records") or []]
+    steps = raw_result.get("step", 0)
+
+    if "__interrupt__" in raw_result:
+        # ainvoke() paused mid-node (a policy check hit RequireApproval) --
+        # this is not a final outcome, just a snapshot of whatever earlier
+        # nodes in this turn already completed.
+        payload = dict(raw_result["__interrupt__"][0].value)
+        return RunResult(
+            outcome="awaiting_approval",
+            report=None,
+            steps=steps,
+            tokens=tokens,
+            tool_calls=tool_calls,
+            sandbox_snapshot=sandbox.snapshot(),
+            pending_approval=payload,
+        )
+
+    return RunResult(
+        outcome=raw_result["outcome"],
+        report=raw_result["report"],
+        steps=steps,
+        tokens=tokens,
+        tool_calls=tool_calls,
+        sandbox_snapshot=sandbox.snapshot(),
+        pending_approval=None,
+    )
+
+
 async def run_react_graph(
     *,
     model: LanguageModelLike,
@@ -352,14 +462,17 @@ async def run_react_graph(
     alert: str,
     settings: Settings,
     tracer: Tracer,
+    store: Store,
     checkpointer: BaseCheckpointSaver[Any],
     run_id: str,
     role: Role = "viewer",
     max_steps: int | None = None,
 ) -> RunResult:
-    """Build and run the graph once, returning the same RunResult shape as
-    the raw loop (opspilot/loops/react_raw.py) -- so the CLI, store writes,
-    and eval graders (Day 3) treat both strategies identically.
+    """Build and start the graph, returning the same RunResult shape as the
+    raw loop (opspilot/loops/react_raw.py) -- so the CLI, store writes, and
+    eval graders (Day 3) treat both strategies identically. If a tool call
+    needs human approval, returns with outcome="awaiting_approval" instead
+    of blocking forever; call resume_react_graph() once a decision exists.
     """
     compiled = build_graph(
         model=model,
@@ -367,6 +480,7 @@ async def run_react_graph(
         sandbox=sandbox,
         settings=settings,
         tracer=tracer,
+        store=store,
         max_steps=max_steps,
         checkpointer=checkpointer,
     )
@@ -385,8 +499,8 @@ async def run_react_graph(
         },
         "outcome": None,
         "report": None,
-        "pending_action": None,
         "policy_decisions": None,
+        "policy_edited_args": None,
         "role": role,
         "run_id": run_id,
         "last_tool_signature": None,
@@ -396,13 +510,72 @@ async def run_react_graph(
         "tool_call_records": [],
     }
     config = {"configurable": {"thread_id": run_id}}
-    final_state = await compiled.ainvoke(initial_state, config=config)
+    raw_result = await compiled.ainvoke(initial_state, config=config)
+    return _finalize_or_pause(raw_result, sandbox)
 
-    return RunResult(
-        outcome=final_state["outcome"],
-        report=final_state["report"],
-        steps=final_state["step"],
-        tokens=TokenTotals(**final_state["tokens_used"]),
-        tool_calls=[ToolCallRecord(**tc) for tc in final_state["tool_call_records"]],
-        sandbox_snapshot=sandbox.snapshot(),
+
+async def resume_react_graph(
+    *,
+    model: LanguageModelLike,
+    registry: ToolRegistry,
+    sandbox: Sandbox,
+    settings: Settings,
+    tracer: Tracer,
+    store: Store,
+    checkpointer: BaseCheckpointSaver[Any],
+    run_id: str,
+    decision: dict[str, Any],
+    max_steps: int | None = None,
+) -> RunResult:
+    """Resume a run paused at outcome="awaiting_approval".
+
+    `decision` is {"decision": "approve"|"reject"|"edit", "approver": str,
+    "reason": str (for reject), "args": dict (for edit)}.
+
+    [HARNESS:HITL] This function runs OUTSIDE any graph node -- unlike the
+    policy node's own code, it is never replayed, so it's the one safe
+    place to update the ApprovalDoc exactly once and compute the
+    approval_wait span from real elapsed wall-clock time (requested_at to
+    now), which can span a completely separate process launched much later
+    -- the whole point of checkpointing to Mongo instead of memory.
+    """
+    compiled = build_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        max_steps=max_steps,
+        checkpointer=checkpointer,
     )
+    config = {"configurable": {"thread_id": run_id}}
+
+    state = await compiled.aget_state(config)
+    if not state.tasks or not state.tasks[0].interrupts:
+        raise ValueError(f"run {run_id!r} has no pending approval to resume")
+    interrupt_payload = state.tasks[0].interrupts[0].value
+    approval_id = interrupt_payload["approval_id"]
+
+    approval = await store.get_approval(approval_id)
+    if approval is None:
+        raise ValueError(f"no ApprovalDoc found for {approval_id!r}")
+
+    decided_at = datetime.now(UTC)
+    status = "rejected" if decision["decision"] == "reject" else "approved"
+    await store.update_approval(
+        approval_id,
+        {"status": status, "decided_at": decided_at, "approver": decision.get("approver")},
+    )
+    wait_ms = (decided_at - approval.requested_at).total_seconds() * 1000
+    await tracer.record_span(
+        "approval_wait",
+        approval.tool,
+        start=approval.requested_at,
+        duration_ms=wait_ms,
+        approval_id=approval_id,
+        decision=decision["decision"],
+    )
+
+    raw_result = await compiled.ainvoke(Command(resume=decision), config=config)
+    return _finalize_or_pause(raw_result, sandbox)
