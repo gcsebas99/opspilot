@@ -10,6 +10,7 @@ from opspilot.env.generator import build_sandbox
 from opspilot.env.sandbox import Sandbox
 from opspilot.env.scenarios import get_scenario
 from opspilot.loops.graph import resume_react_graph, run_react_graph
+from opspilot.observability.audit import verify_chain
 from opspilot.observability.tracer import Tracer
 from opspilot.store.memory import MemoryStore
 from opspilot.tools.base import ToolRegistry
@@ -70,6 +71,7 @@ async def test_graph_reaches_submit_report(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "completed"
@@ -102,6 +104,7 @@ async def test_graph_reaches_escalate(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "escalated"
@@ -129,6 +132,7 @@ async def test_graph_max_steps(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "max_steps"
@@ -156,6 +160,7 @@ async def test_graph_budget_exceeded(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "budget_exceeded"
@@ -180,6 +185,7 @@ async def test_graph_no_report_after_two_plain_text_turns(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "no_report"
@@ -207,6 +213,7 @@ async def test_graph_stuck_detection(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "stuck"
@@ -233,6 +240,7 @@ async def test_graph_parallel_tool_calls(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     assert result.outcome == "completed"
@@ -257,6 +265,7 @@ async def test_graph_destructive_tool_denied_for_viewer(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
         role="viewer",
     )
 
@@ -284,6 +293,7 @@ async def test_graph_destructive_tool_allowed_for_admin(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
         role="admin",
     )
 
@@ -310,6 +320,7 @@ async def test_graph_checkpointer_persists_thread_state(
         store=store,
         checkpointer=checkpointer,
         run_id="thread-42",
+        prompt_version="v1",
     )
 
     checkpoints = list(checkpointer.list({"configurable": {"thread_id": "thread-42"}}))
@@ -336,6 +347,7 @@ async def test_graph_operator_destructive_pauses_for_approval(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
         role="operator",
     )
 
@@ -369,6 +381,7 @@ async def test_graph_resume_approve_executes_tool(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         role="operator",
     )
     assert paused.outcome == "awaiting_approval"
@@ -382,6 +395,7 @@ async def test_graph_resume_approve_executes_tool(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         decision={"decision": "approve", "approver": "alice"},
     )
 
@@ -418,6 +432,7 @@ async def test_graph_resume_reject_tool_not_executed_model_informed(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         role="operator",
     )
     assert paused.outcome == "awaiting_approval"
@@ -431,6 +446,7 @@ async def test_graph_resume_reject_tool_not_executed_model_informed(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         decision={"decision": "reject", "reason": "not safe right now", "approver": "alice"},
     )
 
@@ -470,6 +486,7 @@ async def test_graph_resume_edit_uses_edited_args(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         role="operator",
     )
 
@@ -482,6 +499,7 @@ async def test_graph_resume_edit_uses_edited_args(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         decision={
             "decision": "edit",
             "args": {"service": "checkout", "version": 12},
@@ -513,6 +531,7 @@ async def test_resume_without_pending_approval_raises(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         role="admin",
     )
 
@@ -526,6 +545,7 @@ async def test_resume_without_pending_approval_raises(
             store=store,
             checkpointer=checkpointer,
             run_id="test-run",
+            prompt_version="v1",
             decision={"decision": "approve", "approver": "alice"},
         )
 
@@ -552,6 +572,7 @@ async def test_graph_tool_output_is_framed_and_labeled_untrusted(
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
     )
 
     tup = checkpointer.get_tuple({"configurable": {"thread_id": "test-run"}})
@@ -587,6 +608,7 @@ async def test_graph_prompt_injection_detected_emits_nested_guardrail_span(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
     )
 
     spans = await store.list_spans("test-run")
@@ -613,6 +635,7 @@ async def test_graph_admin_destructive_call_on_unrelated_service_requires_approv
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
         role="admin",
     )
 
@@ -641,6 +664,7 @@ async def test_graph_admin_destructive_call_allowed_once_service_investigated(
         store=store,
         checkpointer=InMemorySaver(),
         run_id="test-run",
+        prompt_version="v1",
         role="admin",
     )
 
@@ -677,6 +701,7 @@ async def test_graph_prompt_injection_scenario_pauses_then_rejects_unrelated_res
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         role="admin",
     )
 
@@ -696,9 +721,116 @@ async def test_graph_prompt_injection_scenario_pauses_then_rejects_unrelated_res
         store=store,
         checkpointer=checkpointer,
         run_id="test-run",
+        prompt_version="v1",
         decision={"decision": "reject", "approver": "sre-on-call", "reason": "unrelated service"},
     )
 
     restart_call = next(tc for tc in result.tool_calls if tc.name == "restart_service")
     assert restart_call.ok is False
     assert result.outcome == "escalated"
+
+
+# --- Audit log (2.7) ---
+
+
+async def test_graph_permission_denial_writes_audit_entry(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    escalate = _tool_call_message("escalate", {"reason": "denied"}, call_id="b")
+    model = FakeMessagesListChatModel(responses=[restart, escalate])
+    tracer, store = _tracer()
+
+    await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="checkout latency spiking",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=InMemorySaver(),
+        run_id="test-run",
+        prompt_version="v1",
+        role="viewer",
+    )
+
+    entries = await store.list_audit("test-run")
+    assert [e.action for e in entries] == ["permission_denied"]
+    assert entries[0].target == "restart_service"
+    assert entries[0].actor == "viewer"
+    assert entries[0].hash is not None
+
+
+async def test_graph_destructive_execution_writes_audit_entry(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="b")
+    model = FakeMessagesListChatModel(responses=[restart, submit])
+    tracer, store = _tracer()
+
+    await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="checkout is down",  # names the target service -> in scope for admin
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=InMemorySaver(),
+        run_id="test-run",
+        prompt_version="v1",
+        role="admin",
+    )
+
+    entries = await store.list_audit("test-run")
+    assert [e.action for e in entries] == ["destructive_tool_executed"]
+    assert entries[0].decision == "executed"
+
+
+async def test_graph_approval_decision_writes_audit_entry_after_resume(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="b")
+    model = FakeMessagesListChatModel(responses=[restart, submit])
+    tracer, store = _tracer()
+    checkpointer = InMemorySaver()
+
+    await run_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="checkout latency spiking",
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        prompt_version="v1",
+        role="operator",
+    )
+    await resume_react_graph(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        settings=settings,
+        tracer=tracer,
+        store=store,
+        checkpointer=checkpointer,
+        run_id="test-run",
+        prompt_version="v1",
+        decision={"decision": "approve", "approver": "alice"},
+    )
+
+    entries = await store.list_audit("test-run")
+    actions = [e.action for e in entries]
+    assert actions == ["approval_decision", "destructive_tool_executed"]
+    assert entries[0].actor == "alice"
+    assert entries[0].decision == "approve"
+
+    # Confirms resume_react_graph and tools_node -- two different call
+    # sites -- correctly read/extend the SAME global chain via
+    # store.get_last_audit(), not independent per-site state.
+    assert verify_chain(entries).ok is True

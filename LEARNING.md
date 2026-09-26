@@ -17,11 +17,17 @@ Retries should be limited, loop should end even with non-positive outcome, but p
 
 ## Day 2
 ### Tracing & metrics
+Record every step in a single run (spans) for observability and auditory,
 ### LangGraph vs raw loop
+Raw loop (i.e. react loop) is not interactive and can't be interrupted, graph allows to create a graph-shaped execution that allows to interrupt, quite important to implement HITL. Raw loop executes an infinite loop that halts based on exit conditions. LangGraph allows to define nodes per each relevant actions (model, tools, policy) and edges (conditional and non-conditional) to connect them allowng a better understanding of the agent behaiviour
 ### Permissions
+Source of truth for allowing/denying tool use.
 ### HITL & checkpointing
+Raw loop can't handle HITL. It's available through langchain interrupt()
 ### Guardrails / prompt injection
+Not the same as roles and permissions. Prevent prompt injection by marking tools result as untrusted content and clear instructions to avoid interpreting direct messages to the model from the tool result content.
 ### Audit log
+Audit is not the same as observability, audit allows to answer who and when?
 
 ## Day 3
 ### Golden dataset design
@@ -40,7 +46,7 @@ Retries should be limited, loop should end even with non-positive outcome, but p
 ## Interview answers I want to nail
 -
 
-### from agent review - day 1
+### From agent review - day 1
 
   One actual error to fix
 
@@ -79,3 +85,40 @@ Retries should be limited, loop should end even with non-positive outcome, but p
   Fill in that empty "Interview answers I want to nail" section at the bottom — docs/specs/day1.md has 7 explicit questions (ReAct loop at the API level, exit conditions, tool error handling, why
   truncate, what makes an environment "good," progressive disclosure, what caching does/breaks). Writing a tight 2-3 sentence answer to each of those now, while it's fresh, is worth more than
   polishing the summary notes further.
+
+
+  ### From agent review - day 2
+
+    Tracing & metrics — thin (trailing comma, unfinished sentence).
+  - Missing the actual span shape: kind/name/start/duration_ms/status/attrs, nested via a contextvar (not passed-through parameters) — that's the mechanism, not just "record every step."
+  - No mention of the metrics dashboard content: p50/p95 model-call latency, tool error rates, outcomes distribution, avg cost/scenario — this directly answers spec Q2 ("what would you page on?") and isn't in your notes at all.
+  - Missing why spans are a separate Mongo collection (spec Q8, literally asked): one run can produce more spans than fit in a 16MB doc, and the real query shape is "all spans for one run, in time order" → (run_id, start) compound
+    index.
+  - Worth a line on the raw loop having no live tracer — spans get reconstructed post-hoc by replaying LoopEvents after the run finishes.
+
+  LangGraph vs raw loop — good on architecture (nodes/edges), missing the mechanism.
+  - The reason raw can't interrupt: it's just a Python while loop with no persisted state between iterations. LangGraph's checkpointer persists state between node executions, so a paused thread can resume — even in a different
+    process, via Mongo.
+  - Spec Q3 asks "when wouldn't you use LangGraph?" — currently unanswered. Worth 1-2 lines (framework/learning-curve overhead for what's still a fairly linear flow here).
+  - Good anecdote sitting unused: AsyncMongoDBSaver doesn't exist in the installed package (removed going into LangGraph 1.0, only caught by trying the import) — same "verify against real behavior" story shape as Day 1's 529 one.
+
+  Permissions — one line, too thin to defend in an interview.
+  - Missing the mechanism: pure decide(role, tool) table keyed on (role, risk), not (role, tool).
+  - Spec Q6 ("what does the model see when denied?") is unanswered: the model never sees the table, only a tool_result with ok=False and a reason string — enforcement lives where the model's output can't reach it.
+  - Missing 2.6's scope check entirely — even admin gets bumped to approval-required for a destructive call on a service not named in the alert/evidence. Worth adding since it postdates when this line was written.
+
+  HITL & checkpointing — has a small error: it's langgraph.types.interrupt(), not langchain.
+  - Spec Q4 ("survives a process restart?") is the whole point of this section and isn't actually answered — needs: a node re-runs from the top on resume; only a real checkpointer (Mongo, not in-memory) lets a different process pick
+    up the paused thread.
+  - Missing the two non-obvious gotchas worth having ready: writes before interrupt() must be idempotent (replay re-runs them), and nothing wrapping interrupt() can be a live span context manager.
+  - Missing: decisions are approve/reject/edit, and the decision is stored in your own ApprovalDoc, separate from LangGraph's checkpoint.
+
+  Guardrails / prompt injection — describes framing (layer 1) only.
+  - Spec Q5 explicitly asks "why isn't the prompt enough?" — your notes don't answer it. The answer: detection is a regex heuristic that will miss novel phrasing (confirmed live — a real run's own grep pattern just didn't match the
+    injected line); the actual defense is the scope check, which never reads tool output text at all.
+  - Missing "defense in depth, 3 layers" as the organizing idea (framing / detection / enforcement) rather than one blended sentence.
+
+  Audit log — the who/when framing is right, but spec Q7 ("prove nobody tampered?") is unanswered.
+  - Needs: append-only alone only stops accidental loss; the hash chain (each record hashes its own fields + previous hash) means editing one record breaks every hash after it, and verify_chain reports the exact first broken index.
+  - Great unused anecdote: BSON truncates datetimes to millisecond precision, so hashing full microsecond timestamps before insert made every untampered record look tampered after a real Mongo round-trip — only found by testing
+    against real Mongo, not the in-memory store.

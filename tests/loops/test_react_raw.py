@@ -493,3 +493,58 @@ async def test_prompt_injection_scenario_blocks_unrelated_restart(
     assert rollback_call.ok is True  # checkout is named in the alert -- proceeds
 
     assert result.outcome == "completed"
+
+
+# --- Audit event shape (2.7) ---
+# The raw loop has no live store -- cli.py replays these events into
+# AuditDoc entries post-hoc (record_loop_audit, tested directly against
+# synthetic events in tests/observability/test_audit.py). These tests only
+# check the loop emits the fields that replay depends on.
+
+
+async def test_tool_call_event_carries_risk_and_policy_decision_for_denial(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_use("restart_service", {"service": "checkout"}, tool_use_id="a")
+    escalate = _tool_use("escalate", {"reason": "denied"}, tool_use_id="b")
+    model = ScriptedModel([restart, escalate])
+    events: list[LoopEvent] = []
+
+    await run_react_loop(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="checkout latency spiking",
+        settings=settings,
+        role="viewer",
+        on_event=events.append,
+    )
+
+    event = next(e for e in events if e.type == "tool_call" and e.data["name"] == "restart_service")
+    assert event.data["risk"] == "destructive"
+    assert event.data["policy_decision"] == "deny"
+    assert event.data["denial_reason"] is not None
+
+
+async def test_tool_call_event_carries_risk_and_policy_decision_for_allowed_destructive(
+    sandbox: Sandbox, registry: ToolRegistry, settings: Settings
+) -> None:
+    restart = _tool_use("restart_service", {"service": "checkout"}, tool_use_id="a")
+    submit = _tool_use("submit_report", _REPORT_INPUT, tool_use_id="b")
+    model = ScriptedModel([restart, submit])
+    events: list[LoopEvent] = []
+
+    await run_react_loop(
+        model=model,
+        registry=registry,
+        sandbox=sandbox,
+        alert="checkout is down",
+        settings=settings,
+        role="admin",
+        on_event=events.append,
+    )
+
+    event = next(e for e in events if e.type == "tool_call" and e.data["name"] == "restart_service")
+    assert event.data["risk"] == "destructive"
+    assert event.data["policy_decision"] == "allow"
+    assert event.data["denial_reason"] is None

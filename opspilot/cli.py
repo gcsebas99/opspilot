@@ -18,6 +18,11 @@ from opspilot.env.scenarios import get_scenario
 from opspilot.loops.graph import build_checkpointer, resume_react_graph, run_react_graph
 from opspilot.loops.react_raw import LoopEvent, RunResult, run_react_loop
 from opspilot.models.anthropic_model import AnthropicModel
+from opspilot.observability.audit import (
+    record_loop_audit,
+    record_prompt_version_change_if_needed,
+    verify_chain,
+)
 from opspilot.observability.instrumentation import record_loop_spans
 from opspilot.observability.metrics import build_dashboard, run_summary
 from opspilot.observability.pricing import cost_usd
@@ -137,7 +142,18 @@ async def _run_async(
     await store.ensure_indexes()
     run_id = str(uuid.uuid4())
     tracer = Tracer(store, run_id=run_id)
+    current_prompt_version = prompt_version(CONTEXT_DIR, registry.to_anthropic_schema())
 
+    # Must run before insert_run below -- it looks at the *previous* most
+    # recent run to detect a change, and this run's own RunDoc would
+    # otherwise already be that "previous" run by the time it checks.
+    await record_prompt_version_change_if_needed(
+        store,
+        run_id=run_id,
+        prompt_version=current_prompt_version,
+        model=settings.opspilot_model,
+        ts=datetime.now(UTC),
+    )
     await store.insert_run(
         RunDoc(
             run_id=run_id,
@@ -146,7 +162,7 @@ async def _run_async(
             seed=seed,
             role=role,
             model=settings.opspilot_model,
-            prompt_version=prompt_version(CONTEXT_DIR, registry.to_anthropic_schema()),
+            prompt_version=current_prompt_version,
             strategy=strategy,
         )
     )
@@ -178,6 +194,15 @@ async def _run_async(
             # this block exits, so writing the nested spans after exit
             # would silently produce a flat trace (parent_id=None everywhere).
             await record_loop_spans(tracer, run_span.start, events, model=settings.opspilot_model)
+            await record_loop_audit(
+                store,
+                run_span.start,
+                events,
+                run_id=run_id,
+                role=role,
+                prompt_version=current_prompt_version,
+                model=settings.opspilot_model,
+            )
     else:
         chat_model = ChatAnthropic(
             model=settings.opspilot_model, max_tokens=8192, api_key=settings.anthropic_api_key
@@ -201,6 +226,7 @@ async def _run_async(
                     store=store,
                     checkpointer=checkpointer,
                     run_id=run_id,
+                    prompt_version=current_prompt_version,
                     role=role,
                     max_steps=max_steps,
                 )
@@ -235,6 +261,7 @@ async def _run_async(
                     checkpointer=checkpointer,
                     run_id=run_id,
                     decision=decision,
+                    prompt_version=current_prompt_version,
                     max_steps=max_steps,
                 )
         finally:
@@ -436,6 +463,7 @@ async def _approve_async(approval_id: str, reject: bool, reason: str, approver: 
             checkpointer=checkpointer,
             run_id=run.run_id,
             decision=decision,
+            prompt_version=run.prompt_version,
         )
     finally:
         if mongo_client is not None:
@@ -469,6 +497,35 @@ async def _approve_async(approval_id: str, reject: bool, reason: str, approver: 
             f"{pending['approval_id']} -- run `opspilot approve {pending['approval_id']}` "
             "to continue."
         )
+
+
+audit_app = typer.Typer(help="Inspect and verify the tamper-evident audit log.")
+app.add_typer(audit_app, name="audit")
+
+
+@audit_app.command("verify")
+def audit_verify() -> None:
+    """Recompute the audit log's hash chain and report the first broken link, if any."""
+    asyncio.run(_audit_verify_async())
+
+
+async def _audit_verify_async() -> None:
+    settings = get_settings()
+    store = build_store(settings)
+    entries = await store.list_audit()
+    result = verify_chain(entries)
+
+    if result.ok:
+        console.print(
+            f"[green]audit log verified:[/green] {result.total_entries} entries, chain intact"
+        )
+        return
+
+    console.print(
+        f"[red]audit log TAMPERED[/red]: chain breaks at entry "
+        f"{result.broken_at_index} of {result.total_entries} ({result.reason})"
+    )
+    raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

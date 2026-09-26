@@ -15,7 +15,7 @@ from opspilot.policy.guardrails import (
     frame_tool_output,
     is_in_scope,
 )
-from opspilot.policy.permissions import Allow, Role, decide
+from opspilot.policy.permissions import Allow, Deny, RequireApproval, Role, decide
 from opspilot.tools.base import ToolRegistry, ToolResult
 
 Outcome = Literal[
@@ -236,6 +236,8 @@ async def run_react_loop(
             # (opspilot/loops/graph.py) implements the real interrupt/resume
             # flow for RequireApproval (2.5); that's one of the concrete
             # reasons this project ported to LangGraph in the first place.
+            policy_decision: str | None = None
+            denial_reason: str | None = None
             if tool is None:
                 result = registry.execute(block.name, block.input, sandbox)
             else:
@@ -247,8 +249,16 @@ async def run_react_loop(
                 )
                 decision = decide(role, tool, in_scope=in_scope)
                 if isinstance(decision, Allow):
+                    policy_decision = "allow"
                     result = registry.execute(block.name, block.input, sandbox)
+                elif isinstance(decision, Deny):
+                    policy_decision = "deny"
+                    denial_reason = decision.reason
+                    result = ToolResult(ok=False, content=decision.reason)
                 else:
+                    assert isinstance(decision, RequireApproval)
+                    policy_decision = "require_approval"
+                    denial_reason = decision.reason
                     result = ToolResult(ok=False, content=decision.reason)
                 if tool.risk == "read" and result.ok and service:
                     known_services.add(service)
@@ -277,6 +287,9 @@ async def run_react_loop(
                 truncated=result.truncated,
                 output_size=len(result.content),
                 injection_patterns=injection_patterns,
+                risk=tool.risk if tool is not None else None,
+                policy_decision=policy_decision,
+                denial_reason=denial_reason,
             )
 
             tool_calls.append(

@@ -15,6 +15,7 @@ from langchain_anthropic import ChatAnthropic
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opspilot.config import get_settings
+from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.generator import build_sandbox
 from opspilot.env.scenarios import get_scenario
 from opspilot.loops.graph import build_graph
@@ -40,5 +41,6 @@ GRAPH = build_graph(
     settings=_settings,
     tracer=_tracer,
     store=_store,
+    prompt_version=prompt_version(CONTEXT_DIR, _registry.to_anthropic_schema()),
     checkpointer=InMemorySaver(),
 )

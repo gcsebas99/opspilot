@@ -17,6 +17,7 @@ from opspilot.config import Settings
 from opspilot.context.assembler import build_system_blocks
 from opspilot.env.sandbox import Sandbox
 from opspilot.loops.react_raw import RunResult, TokenTotals, ToolCallRecord
+from opspilot.observability.audit import record_audit
 from opspilot.observability.tracer import Tracer, redact_if_large
 from opspilot.policy.guardrails import (
     INJECTION_WARNING,
@@ -166,7 +167,9 @@ async def _nudge_and_retry_node(state: AgentState) -> dict[str, Any]:
     return {"messages": [nudge], "no_tool_call_strikes": state["no_tool_call_strikes"] + 1}
 
 
-def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> Any:
+def _make_policy_node(
+    registry: ToolRegistry, tracer: Tracer, store: Store, *, model_name: str, prompt_version: str
+) -> Any:
     # [HARNESS:HITL] RequireApproval pauses the run for a human, via
     # interrupt(). WHY THIS SHAPE, VERIFIED EMPIRICALLY (not from docs
     # alone): a node re-runs from the top on every resume, with each
@@ -198,6 +201,15 @@ def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> A
         node_start = datetime.now(UTC)
         decisions: dict[str, str | None] = {}
         edited_args: dict[str, dict[str, Any]] = {}
+        # [HARNESS:AUDIT] Collected, not written immediately -- see this
+        # node's [HARNESS:HITL] WHY above. A Deny in the same batch as a
+        # RequireApproval would otherwise get audited twice: once on the
+        # pausing pass (which never reaches the return below, so in
+        # practice it wouldn't -- but relying on that is fragile) and once
+        # on the resume pass replaying this same call from scratch. Flushed
+        # only where the policy_check span already is: reached exactly
+        # once, by the pass that completes without hitting a new interrupt.
+        denial_audit: list[tuple[str, str]] = []
 
         for tool_call in last.tool_calls:
             call_id = tool_call["id"]
@@ -220,6 +232,7 @@ def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> A
                 continue
             if isinstance(decision, Deny):
                 decisions[call_id] = decision.reason
+                denial_audit.append((tool.name, decision.reason))
                 continue
 
             # RequireApproval: pause for a human.
@@ -266,6 +279,18 @@ def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> A
             role=role,
             decisions=decisions,
         )
+        for tool_name, reason in denial_audit:
+            await record_audit(
+                store,
+                actor=role,
+                action="permission_denied",
+                target=tool_name,
+                decision=reason,
+                run_id=run_id,
+                prompt_version=prompt_version,
+                model=model_name,
+                ts=node_start,
+            )
         return {
             "policy_decisions": decisions,
             "policy_edited_args": edited_args,
@@ -275,13 +300,23 @@ def _make_policy_node(registry: ToolRegistry, tracer: Tracer, store: Store) -> A
     return policy_node
 
 
-def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -> Any:
+def _make_tools_node(
+    registry: ToolRegistry,
+    sandbox: Sandbox,
+    tracer: Tracer,
+    store: Store,
+    *,
+    model_name: str,
+    prompt_version: str,
+) -> Any:
     async def tools_node(state: AgentState) -> dict[str, Any]:
         last = state["messages"][-1]
         if not isinstance(last, AIMessage):
             raise TypeError(f"expected AIMessage with tool_calls, got {type(last).__name__}")
         decisions = state.get("policy_decisions") or {}
         edited_args = state.get("policy_edited_args") or {}
+        role = state["role"]
+        run_id = state["run_id"]
         tool_messages: list[BaseMessage] = []
         tool_call_records: list[dict[str, Any]] = []
         outcome: str | None = None
@@ -346,6 +381,26 @@ def _make_tools_node(registry: ToolRegistry, sandbox: Sandbox, tracer: Tracer) -
                 and service not in known_services
             ):
                 known_services.append(service)
+
+            # [HARNESS:AUDIT] "Not denied" covers both a plain Allow and an
+            # approved RequireApproval (resume_react_graph clears
+            # policy_decisions[call_id] to None on approve, same as
+            # policy_node does for a plain Allow) -- both are a destructive
+            # action that actually ran, which is what the spec asks to
+            # audit. tools_node is never replayed (unlike policy_node), so
+            # this can write directly with no deferral.
+            if tool is not None and tool.risk == "destructive" and denial_reason is None:
+                await record_audit(
+                    store,
+                    actor=role,
+                    action="destructive_tool_executed",
+                    target=name,
+                    decision="executed" if result.ok else "execution failed",
+                    run_id=run_id,
+                    prompt_version=prompt_version,
+                    model=model_name,
+                    ts=datetime.now(UTC),
+                )
 
             framed_content = frame_tool_output(name, result.content)
             if injection_patterns:
@@ -433,17 +488,34 @@ def build_graph(
     settings: Settings,
     tracer: Tracer,
     store: Store,
+    prompt_version: str,
     max_steps: int | None = None,
     checkpointer: BaseCheckpointSaver[Any],
 ) -> Any:
     effective_max_steps = settings.opspilot_max_steps if max_steps is None else max_steps
     token_budget = settings.opspilot_token_budget
+    model_name = settings.opspilot_model
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", _make_agent_node(model, tracer))
     graph.add_node("nudge_and_retry", _nudge_and_retry_node)
-    graph.add_node("policy", _make_policy_node(registry, tracer, store))
-    graph.add_node("tools", _make_tools_node(registry, sandbox, tracer))
+    graph.add_node(
+        "policy",
+        _make_policy_node(
+            registry, tracer, store, model_name=model_name, prompt_version=prompt_version
+        ),
+    )
+    graph.add_node(
+        "tools",
+        _make_tools_node(
+            registry,
+            sandbox,
+            tracer,
+            store,
+            model_name=model_name,
+            prompt_version=prompt_version,
+        ),
+    )
     graph.add_node(_MARK_MAX_STEPS, _mark("max_steps"))
     graph.add_node(_MARK_BUDGET_EXCEEDED, _mark("budget_exceeded"))
     graph.add_node(_MARK_NO_REPORT, _mark("no_report"))
@@ -521,6 +593,7 @@ async def run_react_graph(
     store: Store,
     checkpointer: BaseCheckpointSaver[Any],
     run_id: str,
+    prompt_version: str,
     role: Role = "viewer",
     max_steps: int | None = None,
 ) -> RunResult:
@@ -529,6 +602,9 @@ async def run_react_graph(
     eval graders (Day 3) treat both strategies identically. If a tool call
     needs human approval, returns with outcome="awaiting_approval" instead
     of blocking forever; call resume_react_graph() once a decision exists.
+    `prompt_version` is passed in rather than recomputed here -- the CLI
+    computes it once (for RunDoc) and this keeps that the single source of
+    truth for what gets attributed on every audit entry this run writes.
     """
     compiled = build_graph(
         model=model,
@@ -537,6 +613,7 @@ async def run_react_graph(
         settings=settings,
         tracer=tracer,
         store=store,
+        prompt_version=prompt_version,
         max_steps=max_steps,
         checkpointer=checkpointer,
     )
@@ -583,6 +660,7 @@ async def resume_react_graph(
     checkpointer: BaseCheckpointSaver[Any],
     run_id: str,
     decision: dict[str, Any],
+    prompt_version: str,
     max_steps: int | None = None,
 ) -> RunResult:
     """Resume a run paused at outcome="awaiting_approval".
@@ -595,7 +673,9 @@ async def resume_react_graph(
     place to update the ApprovalDoc exactly once and compute the
     approval_wait span from real elapsed wall-clock time (requested_at to
     now), which can span a completely separate process launched much later
-    -- the whole point of checkpointing to Mongo instead of memory.
+    -- the whole point of checkpointing to Mongo instead of memory. Same
+    reasoning makes it the safe place to write the approval_decision audit
+    entry directly, with no replay-deferral needed.
     """
     compiled = build_graph(
         model=model,
@@ -604,6 +684,7 @@ async def resume_react_graph(
         settings=settings,
         tracer=tracer,
         store=store,
+        prompt_version=prompt_version,
         max_steps=max_steps,
         checkpointer=checkpointer,
     )
@@ -633,6 +714,17 @@ async def resume_react_graph(
         duration_ms=wait_ms,
         approval_id=approval_id,
         decision=decision["decision"],
+    )
+    await record_audit(
+        store,
+        actor=str(decision.get("approver") or "unknown"),
+        action="approval_decision",
+        target=approval.tool,
+        decision=decision["decision"],
+        run_id=run_id,
+        prompt_version=prompt_version,
+        model=settings.opspilot_model,
+        ts=decided_at,
     )
 
     raw_result = await compiled.ainvoke(Command(resume=decision), config=config)
