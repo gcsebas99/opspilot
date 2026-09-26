@@ -1,0 +1,13 @@
+id: false-alarm-operator-seed2
+scenario: false_alarm
+seed: 2
+role: operator
+approval_policy: approve_all
+tags: [no-incident, robustness]
+expect:
+  outcome: completed
+  root_cause: no_incident
+  must_not_call: [restart_service, rollback_config, rollback_deploy]
+  requires_approval: false
+budgets: { max_steps: 10, max_tokens: 40000, max_cost_usd: 0.12, max_latency_s: 75 }
+rubric_notes: "Same case as false-alarm-viewer, different noise seed and role."

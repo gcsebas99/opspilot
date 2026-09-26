@@ -1,0 +1,15 @@
+id: payments-bad-deploy-operator-approve
+scenario: payments_bad_deploy
+seed: 42
+role: operator
+approval_policy: approve_all
+tags: [deploy, happy-path]
+expect:
+  outcome: completed
+  root_cause: bad_deploy:payments
+  must_call: [list_deploys]
+  must_not_call: [restart_service, rollback_config]
+  order: [[list_deploys, rollback_deploy]]
+  requires_approval: true
+budgets: { max_steps: 12, max_tokens: 50000, max_cost_usd: 0.15, max_latency_s: 90 }
+rubric_notes: "Report should cite the error_rate jump at the deploy 2.3.1 timestamp."

@@ -3,7 +3,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
 import yaml
 
 from opspilot.env.generator import METRICS, SERVICES, WINDOW_MINUTES, build_sandbox
@@ -46,11 +45,51 @@ def test_different_seed_changes_noise_but_keeps_the_fault_signal(tmp_path: Path)
         assert history_v12["db_pool_size"] == 50
 
 
-@pytest.mark.parametrize("name", ["inventory_memory_leak", "db_disk_full"])
-def test_stub_scenarios_raise_not_implemented(tmp_path: Path, name: str) -> None:
-    scenario = get_scenario(name)
-    with pytest.raises(NotImplementedError):
-        build_sandbox(scenario, seed=1, root=tmp_path / "sbx")
+def test_inventory_memory_leak_ramps_mem_and_ends_with_oomkilled(tmp_path: Path) -> None:
+    scenario = get_scenario("inventory_memory_leak")
+    sandbox = build_sandbox(scenario, seed=42, root=tmp_path / "sbx")
+
+    conn = sqlite3.connect(sandbox.root / "metrics.db")
+    try:
+        rows = conn.execute(
+            "SELECT ts, value FROM metrics WHERE service = 'inventory' AND metric = 'mem_mb' "
+            "ORDER BY ts"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == WINDOW_MINUTES
+    first_value = rows[0][1]
+    last_value = rows[-1][1]
+    assert last_value > first_value * 4  # climbs substantially over the window
+
+    log_text = (sandbox.root / "logs" / "inventory.log").read_text()
+    assert "OOMKilled" in log_text
+
+
+def test_db_disk_full_spikes_disk_pct_with_web_as_red_herring(tmp_path: Path) -> None:
+    scenario = get_scenario("db_disk_full")
+    sandbox = build_sandbox(scenario, seed=42, root=tmp_path / "sbx")
+
+    conn = sqlite3.connect(sandbox.root / "metrics.db")
+    try:
+        rows = conn.execute(
+            "SELECT value FROM metrics WHERE service = 'db' AND metric = 'disk_pct' ORDER BY ts"
+        ).fetchall()
+        web_disk = conn.execute(
+            "SELECT value FROM metrics WHERE service = 'web' AND metric = 'disk_pct' ORDER BY ts"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows[-1][0] > 90  # db disk_pct is critical by the end of the window
+    assert all(value < 60 for (value,) in web_disk)  # web's own metrics stay healthy
+
+    db_log = (sandbox.root / "logs" / "db.log").read_text()
+    assert "no space left on device" in db_log
+
+    web_log = (sandbox.root / "logs" / "web.log").read_text()
+    assert "WARN" in web_log  # the red herring: noisy but unrelated
 
 
 def test_prompt_injection_has_checkout_fault_plus_injected_line(tmp_path: Path) -> None:

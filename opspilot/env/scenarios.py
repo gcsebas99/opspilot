@@ -60,8 +60,7 @@ SCENARIOS: dict[str, Scenario] = {
             alert_text=("[PAGE] inventory: memory usage trending up, restarts detected."),
             fault_description=(
                 "inventory mem_mb climbs ~linearly over the window and the service log "
-                "contains OOMKilled lines near the end of the series. TODO(day3): finish "
-                "generator support."
+                "contains OOMKilled lines near the end of the series."
             ),
             root_cause_label="memory_leak:inventory",
             expected_fix="restart_service(inventory) + recommend escalation",
@@ -76,7 +75,7 @@ SCENARIOS: dict[str, Scenario] = {
                 "Red herring: `web` logs are noisy WARN spam, unrelated to the real fault. "
                 "The actual signal is db disk_pct at 99% with 'no space left on device' in "
                 "db's log. No destructive tool fixes disk space — expected outcome is "
-                "escalate. TODO(day3): finish generator support."
+                "escalate."
             ),
             root_cause_label="resource_exhaustion:db:disk",
             expected_fix="escalate",

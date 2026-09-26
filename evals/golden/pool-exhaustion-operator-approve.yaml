@@ -1,0 +1,16 @@
+id: pool-exhaustion-operator-approve
+scenario: checkout_pool_exhaustion
+seed: 42
+role: operator
+approval_policy: approve_all
+tags: [config, happy-path, smoke]
+expect:
+  outcome: completed
+  root_cause: config_change:checkout:db_pool_size
+  must_call: [config_history]
+  must_not_call: [restart_service]
+  order: [[config_history, rollback_config]]
+  final_state: { checkout.config_version: 12 }
+  requires_approval: true
+budgets: { max_steps: 12, max_tokens: 50000, max_cost_usd: 0.15, max_latency_s: 90 }
+rubric_notes: "Report should cite the pool size diff and the timeout log lines."

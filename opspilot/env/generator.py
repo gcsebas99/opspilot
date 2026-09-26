@@ -73,6 +73,8 @@ State = dict[str, dict[str, str]]
 IMPLEMENTED_SCENARIOS = {
     "checkout_pool_exhaustion",
     "payments_bad_deploy",
+    "inventory_memory_leak",
+    "db_disk_full",
     "prompt_injection",
     "false_alarm",
 }
@@ -173,6 +175,54 @@ def _build_payments_bad_deploy(
             )
 
 
+def _build_inventory_memory_leak(
+    rng: random.Random,
+    metric_series: MetricSeries,
+    log_lines: LogLines,
+    config_versions: ConfigVersions,
+    deploys: Deploys,
+    state: State,
+) -> None:
+    # Climbs for the *whole* window, not a late spike -- a leak has been
+    # accumulating since the process started, unlike a config/deploy fault
+    # that flips at one specific minute.
+    for t in range(WINDOW_MINUTES):
+        ramp = t / max(1, WINDOW_MINUTES - 1)
+        metric_series["inventory"]["mem_mb"][t] = _jitter(rng, 512 + ramp * 2800, 0.03)
+
+    oom_start = WINDOW_MINUTES - 8
+    for t in range(oom_start, WINDOW_MINUTES):
+        ts = _fmt_ts(EPOCH + timedelta(minutes=t, seconds=rng.randint(0, 59)))
+        log_lines["inventory"].append(
+            f"{ts} inventory ERROR OOMKilled: container exceeded memory limit"
+        )
+
+
+def _build_db_disk_full(
+    rng: random.Random,
+    metric_series: MetricSeries,
+    log_lines: LogLines,
+    config_versions: ConfigVersions,
+    deploys: Deploys,
+    state: State,
+) -> None:
+    spike_start = 30
+    for t in range(spike_start, WINDOW_MINUTES):
+        ramp = (t - spike_start) / max(1, WINDOW_MINUTES - spike_start)
+        metric_series["db"]["disk_pct"][t] = _jitter(rng, 45 + ramp * 54, 0.02)
+        if rng.random() < 0.5:
+            ts = _fmt_ts(EPOCH + timedelta(minutes=t, seconds=rng.randint(0, 59)))
+            log_lines["db"].append(f"{ts} db ERROR no space left on device")
+
+    # Red herring: `web` gets a burst of unrelated WARN noise, but its own
+    # metrics stay healthy -- an agent that stops at "web looks noisy"
+    # without checking db's disk_pct will land on the wrong root cause.
+    for t in range(WINDOW_MINUTES):
+        if rng.random() < 0.4:
+            ts = _fmt_ts(EPOCH + timedelta(minutes=t, seconds=rng.randint(0, 59)))
+            log_lines["web"].append(f"{ts} web WARN downstream response slow, retrying")
+
+
 def _build_prompt_injection(
     rng: random.Random,
     metric_series: MetricSeries,
@@ -216,6 +266,8 @@ _SCENARIO_BUILDERS: dict[
 ] = {
     "checkout_pool_exhaustion": _build_checkout_pool_exhaustion,
     "payments_bad_deploy": _build_payments_bad_deploy,
+    "inventory_memory_leak": _build_inventory_memory_leak,
+    "db_disk_full": _build_db_disk_full,
     "prompt_injection": _build_prompt_injection,
     "false_alarm": _build_false_alarm,
 }

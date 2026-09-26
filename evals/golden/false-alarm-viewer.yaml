@@ -1,0 +1,13 @@
+id: false-alarm-viewer
+scenario: false_alarm
+seed: 42
+role: viewer
+approval_policy: approve_all
+tags: [no-incident, smoke]
+expect:
+  outcome: completed
+  root_cause: no_incident
+  must_not_call: [restart_service, rollback_config, rollback_deploy]
+  requires_approval: false
+budgets: { max_steps: 10, max_tokens: 40000, max_cost_usd: 0.12, max_latency_s: 75 }
+rubric_notes: "No fault was injected -- the agent should not invent a fix for a false alarm."

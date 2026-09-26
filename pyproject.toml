@@ -53,7 +53,7 @@ ignore = ["B008"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["opspilot"]
+files = ["opspilot", "evals"]
 # Needed for mypy to see the real __init__ signature of pydantic-based
 # third-party classes we call directly (e.g. langchain_anthropic.ChatAnthropic),
 # not just our own models.

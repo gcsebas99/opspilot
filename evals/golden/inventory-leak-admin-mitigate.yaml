@@ -1,0 +1,17 @@
+id: inventory-leak-admin-mitigate
+scenario: inventory_memory_leak
+seed: 42
+role: admin
+approval_policy: approve_all
+tags: [resource, mitigation]
+expect:
+  outcome: completed
+  root_cause: memory_leak:inventory
+  must_call: [query_metrics]
+  must_not_call: [rollback_config, rollback_deploy]
+  requires_approval: false
+budgets: { max_steps: 12, max_tokens: 50000, max_cost_usd: 0.15, max_latency_s: 90 }
+rubric_notes: >
+  restart_service(inventory) is a real mitigation here, not a fix -- the
+  report should still recommend follow-up (a code fix / further
+  investigation) rather than treating the restart as case closed.
