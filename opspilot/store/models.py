@@ -127,4 +127,9 @@ class EvalTrialDoc(BaseModel):
     # Populated by the graders (3.4) in a separate pass -- left empty here
     # on purpose; 3.2 only runs trials and persists raw results.
     grades: dict[str, Any] | None = None
+    # The case pass rule's verdict (evals/grading.py) -- None until graded.
+    passed: bool | None = None
+    # Separate from `error` (the agent run crashed): grading can fail on its
+    # own (e.g. judge CassetteMiss) and must stay re-gradable without a re-run.
+    grading_error: str | None = None
     error: str | None = None

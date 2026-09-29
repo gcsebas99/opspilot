@@ -9,6 +9,7 @@ from evals.graders.base import Grade
 from evals.models import EvalCase
 from opspilot.env.scenarios import get_scenario
 from opspilot.models.base import ModelClient, ToolUseBlock
+from opspilot.observability.pricing import cost_usd
 from opspilot.store.models import EvalTrialDoc
 
 JUDGE_PROMPT = (Path(__file__).parent / "judge_prompt.md").read_text()
@@ -167,5 +168,8 @@ async def grade_judge(
             "judge_model": judge_model,
             "judge_prompt_version": JUDGE_PROMPT_VERSION,
             "usage": response.usage.model_dump(),
+            # Kept apart from the trial's cost_usd (the agent's spend) so
+            # reports can show what grading itself costs.
+            "cost_usd": cost_usd(judge_model, **response.usage.model_dump()),
         },
     )

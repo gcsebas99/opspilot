@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 
 from evals.loader import load_cases
-from evals.runner import run_suite
+from evals.runner import regrade_sweep, run_suite
 from opspilot.config import get_settings
 from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.cli import app as env_app
@@ -41,7 +41,7 @@ from opspilot.observability.tracer import Tracer
 from opspilot.policy.permissions import Role as PermRole
 from opspilot.store.base import Store
 from opspilot.store.factory import build_store
-from opspilot.store.models import RunDoc, SpanDoc
+from opspilot.store.models import EvalTrialDoc, RunDoc, SpanDoc
 from opspilot.tools.registry import build_default_registry
 
 app = typer.Typer(
@@ -615,8 +615,13 @@ def _git_sha() -> str:
         return "unknown"
 
 
-@app.command("eval")
+eval_app = typer.Typer(help="Run, grade, and inspect eval sweeps.")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.callback(invoke_without_command=True)
 def eval_command(
+    ctx: typer.Context,
     suite: str = typer.Option("golden", "--suite", help="golden (all cases) or a tag filter."),
     k: int = typer.Option(1, "--k", help="Trials per case."),
     strategy: str = typer.Option("graph", "--strategy", help="Loop implementation: raw or graph."),
@@ -627,13 +632,89 @@ def eval_command(
         "saves responses), or live (real API). Default comes from OPSPILOT_MODEL_MODE.",
     ),
     concurrency: int = typer.Option(4, "--concurrency", help="Max trials running at once."),
+    judge: bool = typer.Option(
+        True, "--judge/--no-judge", help="Run the LLM judge (same mode as the agent)."
+    ),
 ) -> None:
-    """Run a suite of golden eval cases and persist every trial."""
+    """Run a suite of golden eval cases, grade every trial, and persist it."""
+    if ctx.invoked_subcommand is not None:
+        return
     if strategy not in ("raw", "graph"):
         console.print(f"[red]--strategy must be 'raw' or 'graph', got {strategy!r}[/red]")
         raise typer.Exit(code=1)
     model_mode = _resolve_mode_or_exit(mode)
-    asyncio.run(_eval_async(suite, k, strategy, model_mode, concurrency))  # type: ignore[arg-type]
+    asyncio.run(_eval_async(suite, k, strategy, model_mode, concurrency, judge))  # type: ignore[arg-type]
+
+
+def _grade_summary(trial: EvalTrialDoc) -> str:
+    grades = trial.grades or {}
+    parts = []
+    if "trajectory" in grades:
+        parts.append(f"traj={grades['trajectory']['score']:.2f}")
+    if "outcome" in grades:
+        parts.append(f"outcome={grades['outcome']['score']:.1f}")
+    if "budget" in grades:
+        parts.append(f"budget={'ok' if grades['budget']['passed'] else 'OVER'}")
+    if "judge" in grades:
+        average = grades["judge"]["details"].get("average")
+        parts.append(f"judge={average:.1f}" if average is not None else "judge=ERR")
+    return " ".join(parts)
+
+
+def _failed_checks(trial: EvalTrialDoc) -> list[str]:
+    failed: list[str] = []
+    for name, grade in (trial.grades or {}).items():
+        if grade["passed"]:
+            continue
+        checks = [c for c in grade["details"].get("checks", []) if not c["passed"]]
+        if checks:
+            failed += [
+                f"{name}: {c['name']}" + (f" ({c['detail']})" if c["detail"] else "")
+                for c in checks
+            ]
+        else:
+            detail = grade["details"].get("match") or grade["details"].get("error") or ""
+            failed.append(f"{name}: {detail}".rstrip(": "))
+    return failed
+
+
+def _print_trials(trials: list[EvalTrialDoc], mode: str, judge: bool) -> int:
+    """Print one line per trial (+ why it failed); return how many errored."""
+    errored = 0
+    judge_cost = 0.0
+    for trial in sorted(trials, key=lambda t: (t.case_id, t.trial)):
+        # Rich's `console.print` treats "[...]" as a (possibly unknown)
+        # style tag and silently drops it -- a case_id in brackets would
+        # vanish from the output rather than error, which is exactly what
+        # happened here until this was caught by an actual live run.
+        label = f"{trial.case_id}#{trial.trial}"
+        if trial.error is not None or trial.grading_error is not None:
+            errored += 1
+            what = "ERROR" if trial.error is not None else "GRADING ERROR"
+            console.print(f"[red]{label} {what}:[/red] {trial.error or trial.grading_error}")
+            continue
+        verdict = "[green]PASS[/green]" if trial.passed else "[red]FAIL[/red]"
+        console.print(
+            f"{verdict} {label}  {_grade_summary(trial)}  "
+            f"cost=${trial.cost_usd or 0:.4f} latency={trial.latency_s or 0:.1f}s"
+        )
+        for line in _failed_checks(trial):
+            console.print(f"     [dim]- {line}[/dim]")
+        judge_grade = (trial.grades or {}).get("judge")
+        if judge_grade is not None:
+            judge_cost += judge_grade["details"].get("cost_usd") or 0.0
+
+    passed = sum(1 for t in trials if t.passed)
+    console.print(
+        f"\n[bold]passed:[/bold] {passed}/{len(trials)}" + ("" if judge else " (no judge)")
+    )
+    if judge:
+        console.print(f"[dim]judge cost: ${judge_cost:.4f}[/dim]")
+    if mode == "replay":
+        console.print(
+            "[dim]replay: costs shown are what the recorded calls cost; spend was $0.[/dim]"
+        )
+    return errored
 
 
 async def _eval_async(
@@ -642,6 +723,7 @@ async def _eval_async(
     strategy: Literal["raw", "graph"],
     mode: Literal["live", "record", "replay"],
     concurrency: int,
+    judge: bool,
 ) -> None:
     settings = get_settings()
     store = build_store(settings)
@@ -658,47 +740,67 @@ async def _eval_async(
         f"[bold]trials:[/bold] {len(cases) * k}"
     )
     console.print(
-        f"[dim]strategy={strategy} mode={mode} concurrency={concurrency} git_sha={git_sha}[/dim]\n"
+        f"[dim]strategy={strategy} mode={mode} concurrency={concurrency} git_sha={git_sha} "
+        f"judge={settings.opspilot_judge_model if judge else 'off'}[/dim]\n"
     )
 
-    trials = await run_suite(
-        cases,
-        k=k,
-        strategy=strategy,
-        mode=mode,
-        concurrency=concurrency,
-        suite=suite,
-        settings=settings,
-        store=store,
-        git_sha=git_sha,
-    )
-
-    ok_count = 0
-    for trial in sorted(trials, key=lambda t: (t.case_id, t.trial)):
-        # Rich's `console.print` treats "[...]" as a (possibly unknown)
-        # style tag and silently drops it -- a case_id in brackets would
-        # vanish from the output rather than error, which is exactly what
-        # happened here until this was caught by an actual live run.
-        label = f"{trial.case_id}#{trial.trial}"
-        if trial.error is not None:
-            console.print(f"[red]{label} ERROR:[/red] {trial.error}")
-            continue
-        ok_count += 1
-        console.print(
-            f"{label} outcome={trial.outcome} "
-            f"cost=${trial.cost_usd or 0:.4f} latency={trial.latency_s or 0:.1f}s"
+    try:
+        trials = await run_suite(
+            cases,
+            k=k,
+            strategy=strategy,
+            mode=mode,
+            concurrency=concurrency,
+            suite=suite,
+            settings=settings,
+            store=store,
+            git_sha=git_sha,
+            judge=judge,
         )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
 
-    console.print(f"\n[bold]sweep_id:[/bold] {trials[0].sweep_id}")
-    console.print(f"{ok_count}/{len(trials)} trials completed without runner errors.")
-    if mode == "replay":
+    errored = _print_trials(trials, mode, judge)
+    console.print(f"[bold]sweep_id:[/bold] {trials[0].sweep_id}")
+    # Non-zero exit on any runner or grading error -- in replay that includes
+    # every agent *or judge* cassette miss, which is what lets CI (3.7) fail
+    # on prompt/rubric drift. Plain FAILs don't exit non-zero: the pass-rate
+    # gate is CI's decision (3.7), not the runner's.
+    if errored:
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("grade")
+def eval_grade(
+    sweep_id: str = typer.Argument(..., help="Sweep to re-grade (printed by `opspilot eval`)."),
+    mode: str | None = typer.Option(
+        None, "--mode", help="Mode for the judge: replay (default), record, or live."
+    ),
+    judge: bool = typer.Option(True, "--judge/--no-judge", help="Re-run the LLM judge too."),
+) -> None:
+    """Re-grade a stored sweep with the current graders and golden cases -- no agent re-run."""
+    model_mode = _resolve_mode_or_exit(mode)
+    asyncio.run(_eval_grade_async(sweep_id, model_mode, judge))
+
+
+async def _eval_grade_async(sweep_id: str, mode: ModelMode, judge: bool) -> None:
+    settings = get_settings()
+    # Same reasoning as `opspilot approve`: an in-memory store died with the
+    # process that ran the sweep, so there's nothing left to re-grade.
+    if settings.opspilot_store != "mongo":
         console.print(
-            "[dim]replay: costs shown are what the recorded calls cost; spend was $0.[/dim]"
+            "[red]opspilot eval grade requires OPSPILOT_STORE=mongo -- trials from an "
+            "in-memory store don't outlive the `opspilot eval` process.[/red]"
         )
-    console.print("[dim](Grading lands in 3.4 -- pass/fail isn't reported yet.)[/dim]")
-    # Non-zero exit on any runner error -- in replay that includes every
-    # cassette miss, which is what lets CI (3.7) fail on prompt drift.
-    if ok_count < len(trials):
+        raise typer.Exit(code=1)
+    store = build_store(settings)
+    trials = await regrade_sweep(sweep_id, store=store, settings=settings, mode=mode, judge=judge)
+    if not trials:
+        console.print(f"[red]no trials found for sweep {sweep_id!r}[/red]")
+        raise typer.Exit(code=1)
+    errored = _print_trials(trials, mode, judge)
+    if errored:
         raise typer.Exit(code=1)
 
 

@@ -82,7 +82,7 @@ def _scores(*values: int) -> dict[str, Any]:
 async def test_good_verdict_passes_and_forces_the_tool() -> None:
     client = ScriptedModel([_verdict(_scores(5, 4, 4, 3, 5))])
 
-    grade = await grade_judge(_case(), _trial(), client, "judge-m")
+    grade = await grade_judge(_case(), _trial(), client, "claude-sonnet-5")
 
     assert grade.passed
     assert grade.details["average"] == pytest.approx(4.2)
@@ -96,7 +96,7 @@ async def test_good_verdict_passes_and_forces_the_tool() -> None:
 
 async def test_average_below_threshold_fails() -> None:
     grade = await grade_judge(
-        _case(), _trial(), ScriptedModel([_verdict(_scores(4, 3, 3, 3, 4))]), "m"
+        _case(), _trial(), ScriptedModel([_verdict(_scores(4, 3, 3, 3, 4))]), "claude-sonnet-5"
     )
     assert grade.details["average"] == pytest.approx(3.4)
     assert not grade.passed
@@ -104,7 +104,7 @@ async def test_average_below_threshold_fails() -> None:
 
 async def test_out_of_range_score_is_a_failed_grade_not_a_crash() -> None:
     grade = await grade_judge(
-        _case(), _trial(), ScriptedModel([_verdict(_scores(7, 4, 4, 4, 4))]), "m"
+        _case(), _trial(), ScriptedModel([_verdict(_scores(7, 4, 4, 4, 4))]), "claude-sonnet-5"
     )
     assert not grade.passed
     assert "malformed verdict" in grade.details["error"]
@@ -113,7 +113,9 @@ async def test_out_of_range_score_is_a_failed_grade_not_a_crash() -> None:
 async def test_missing_criterion_is_a_failed_grade() -> None:
     partial = _scores(5, 5, 5, 5, 5)
     del partial["no_hallucination"]
-    grade = await grade_judge(_case(), _trial(), ScriptedModel([_verdict(partial)]), "m")
+    grade = await grade_judge(
+        _case(), _trial(), ScriptedModel([_verdict(partial)]), "claude-sonnet-5"
+    )
     assert "malformed verdict" in grade.details["error"]
 
 
@@ -130,7 +132,7 @@ async def test_text_reply_instead_of_tool_is_a_failed_grade() -> None:
 
 async def test_no_report_skips_the_model_call() -> None:
     client = ScriptedModel([])
-    grade = await grade_judge(_case(), _trial(report=None), client, "m")
+    grade = await grade_judge(_case(), _trial(report=None), client, "claude-sonnet-5")
     assert not grade.passed
     assert client.calls == []
 

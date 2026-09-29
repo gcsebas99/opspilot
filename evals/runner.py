@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from langgraph.checkpoint.memory import InMemorySaver
 
+from evals.grading import grade_trial
+from evals.loader import load_cases
 from evals.models import ApprovalPolicy, EvalCase
 from opspilot.config import Settings
 from opspilot.context.assembler import CONTEXT_DIR, prompt_version
@@ -14,6 +16,7 @@ from opspilot.env.generator import build_sandbox
 from opspilot.env.scenarios import get_scenario
 from opspilot.loops.graph import resume_react_graph, run_react_graph
 from opspilot.loops.react_raw import LoopEvent, run_react_loop
+from opspilot.models.base import ModelClient
 from opspilot.models.factory import (
     LiveChatFactory,
     LiveClientFactory,
@@ -50,6 +53,50 @@ def cassette_path(cassette_root: Path, case_id: str, trial: int) -> Path:
     # One file per (case, trial): k trials are k independent samples, and
     # trials never share a writer when they run concurrently.
     return cassette_root / case_id / f"{trial}.jsonl"
+
+
+def judge_cassette_path(cassette_root: Path, case_id: str, trial: int) -> Path:
+    # Next to the agent's cassette, separate file: re-recording the judge
+    # (rubric change) must never touch the agent's recorded conversation.
+    return cassette_root / case_id / f"{trial}.judge.jsonl"
+
+
+def _judge_client(
+    settings: Settings,
+    mode: Mode,
+    path: Path,
+    build_judge_client: LiveClientFactory,
+) -> ModelClient:
+    judge_settings = settings.model_copy(update={"opspilot_model": settings.opspilot_judge_model})
+    return build_model_client(judge_settings, mode, path, build_judge_client)
+
+
+async def _apply_grading(
+    case: EvalCase,
+    trial_doc: EvalTrialDoc,
+    *,
+    judge: ModelClient | None,
+    judge_model: str,
+) -> EvalTrialDoc:
+    try:
+        result = await grade_trial(case, trial_doc, judge=judge, judge_model=judge_model)
+    except Exception as exc:  # noqa: BLE001
+        # e.g. a judge CassetteMiss in replay: loud (error -> non-zero exit),
+        # but kept apart from the agent's own result on this trial.
+        return trial_doc.model_copy(
+            update={
+                "grades": None,
+                "passed": False,
+                "grading_error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+    return trial_doc.model_copy(
+        update={
+            "grades": {name: grade.model_dump() for name, grade in result.grades.items()},
+            "passed": result.passed,
+            "grading_error": None,
+        }
+    )
 
 
 # [HARNESS:EVAL] Approval auto-resolution -- what a human's interactive
@@ -109,6 +156,10 @@ async def run_trial(
     cassette_root: Path = DEFAULT_CASSETTE_ROOT,
     build_raw_model: LiveClientFactory = default_live_client,
     build_graph_model: LiveChatFactory = default_live_chat_model,
+    # Off by default: a library caller (or a test) must opt in to judging,
+    # since a live-mode judge is a real API call. The CLI turns it on.
+    judge: bool = False,
+    build_judge_client: LiveClientFactory = default_live_client,
 ) -> EvalTrialDoc:
     """Run one (case, trial) to completion and persist the result.
 
@@ -285,6 +336,24 @@ async def run_trial(
             }
         )
 
+    # A crashed run has nothing meaningful to grade -- it's already a failure.
+    if trial_doc.error is None:
+        judge_client = (
+            _judge_client(
+                settings,
+                mode,
+                judge_cassette_path(cassette_root, case.id, trial),
+                build_judge_client,
+            )
+            if judge
+            else None
+        )
+        trial_doc = await _apply_grading(
+            case, trial_doc, judge=judge_client, judge_model=settings.opspilot_judge_model
+        )
+    else:
+        trial_doc = trial_doc.model_copy(update={"passed": False})
+
     await store.insert_eval_run(trial_doc)
     return trial_doc
 
@@ -304,6 +373,10 @@ async def run_suite(
     cassette_root: Path = DEFAULT_CASSETTE_ROOT,
     build_raw_model: LiveClientFactory = default_live_client,
     build_graph_model: LiveChatFactory = default_live_chat_model,
+    # Off by default: a library caller (or a test) must opt in to judging,
+    # since a live-mode judge is a real API call. The CLI turns it on.
+    judge: bool = False,
+    build_judge_client: LiveClientFactory = default_live_client,
 ) -> list[EvalTrialDoc]:
     """Run every case in `cases` for `k` trials each, `concurrency` at a
     time. One sweep = one call to this function -- `sweep_id` is what lets
@@ -333,6 +406,62 @@ async def run_suite(
                 cassette_root=cassette_root,
                 build_raw_model=build_raw_model,
                 build_graph_model=build_graph_model,
+                judge=judge,
+                build_judge_client=build_judge_client,
             )
 
+    if judge and not settings.opspilot_judge_model:
+        raise ValueError("judging is on but OPSPILOT_JUDGE_MODEL is empty (or pass --no-judge)")
     return await asyncio.gather(*(_bounded(case, trial) for case in cases for trial in range(k)))
+
+
+async def regrade_sweep(
+    sweep_id: str,
+    *,
+    store: Store,
+    settings: Settings,
+    mode: Mode,
+    judge: bool,
+    cassette_root: Path = DEFAULT_CASSETTE_ROOT,
+    build_judge_client: LiveClientFactory = default_live_client,
+) -> list[EvalTrialDoc]:
+    """Re-grade a stored sweep without re-running the agent.
+
+    [HARNESS:EVAL] Graders are decoupled from runs. WHY: fixing a grader
+    or a case's expectations shouldn't cost a re-run of every agent trial --
+    trials store everything graders need (3.4a), so re-grading is free for
+    the deterministic layers and replayable for the judge. Uses the
+    *current* golden case definitions, which is the point: dataset fixes
+    apply to old runs.
+    """
+    cases = {case.id: case for case in load_cases("golden")}
+    regraded: list[EvalTrialDoc] = []
+    for trial in await store.list_eval_runs(sweep_id):
+        case = cases.get(trial.case_id)
+        if case is None or trial.error is not None:
+            # Case since deleted, or the agent run itself crashed: nothing to grade.
+            regraded.append(trial)
+            continue
+        judge_client = (
+            _judge_client(
+                settings,
+                mode,
+                judge_cassette_path(cassette_root, trial.case_id, trial.trial),
+                build_judge_client,
+            )
+            if judge
+            else None
+        )
+        updated = await _apply_grading(
+            case, trial, judge=judge_client, judge_model=settings.opspilot_judge_model
+        )
+        await store.update_eval_run(
+            trial.trial_id,
+            {
+                "grades": updated.grades,
+                "passed": updated.passed,
+                "grading_error": updated.grading_error,
+            },
+        )
+        regraded.append(updated)
+    return regraded
