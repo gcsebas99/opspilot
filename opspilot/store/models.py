@@ -75,3 +75,37 @@ class ApprovalDoc(BaseModel):
     requested_at: datetime
     decided_at: datetime | None = None
     approver: str | None = None
+
+
+class EvalTrialDoc(BaseModel):
+    """One (case x trial) execution from an `opspilot eval` sweep.
+
+    Deliberately self-contained -- everything the graders (3.4) need
+    (tool_calls, report, sandbox_snapshot, outcome) is denormalized onto
+    this document rather than requiring a join against `spans`, so grading
+    a trial is a single read. `run_id` still links back to a normal RunDoc
+    and its spans for anyone who wants the full trace (`opspilot trace`
+    works on an eval trial's run_id exactly like a manual run's).
+    """
+
+    trial_id: str
+    sweep_id: str
+    suite: str
+    case_id: str
+    trial: int
+    run_id: str
+    git_sha: str
+    prompt_version: str
+    model: str
+    strategy: Literal["raw", "graph"]
+    started_at: datetime
+    outcome: str | None = None
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    report: dict[str, Any] | None = None
+    sandbox_snapshot: dict[str, str] = Field(default_factory=dict)
+    cost_usd: float | None = None
+    latency_s: float | None = None
+    # Populated by the graders (3.4) in a separate pass -- left empty here
+    # on purpose; 3.2 only runs trials and persists raw results.
+    grades: dict[str, Any] | None = None
+    error: str | None = None

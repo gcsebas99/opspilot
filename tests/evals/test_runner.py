@@ -1,0 +1,386 @@
+import asyncio
+from pathlib import Path
+from typing import Any
+
+import pytest
+from langchain_core.messages import AIMessage, ToolCall
+
+from evals.models import ApprovalPolicy, EvalCase
+from evals.runner import _resolve_decision, run_suite, run_trial
+from opspilot.config import Settings
+from opspilot.models.base import ModelResponse, ToolUseBlock, Usage
+from opspilot.models.scripted import ScriptedModel
+from opspilot.store.memory import MemoryStore
+from opspilot.tools.base import ToolRegistry
+from opspilot.tools.registry import build_default_registry
+
+_USAGE = Usage(input_tokens=10, output_tokens=5)
+
+_REPORT_INPUT = {
+    "root_cause": "config_change:checkout:db_pool_size",
+    "evidence": ["checkout latency_p95_ms spiked after config v13"],
+    "confidence": 0.9,
+    "recommendation": "monitor for 30 minutes",
+}
+
+
+def _tool_use(name: str, input_: dict[str, Any], tool_use_id: str = "t1") -> ModelResponse:
+    return ModelResponse(
+        content=[ToolUseBlock(id=tool_use_id, name=name, input=input_)],
+        stop_reason="tool_use",
+        usage=_USAGE,
+        latency_ms=1.0,
+    )
+
+
+def _tool_call_message(name: str, args: dict[str, Any], call_id: str = "call_1") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[ToolCall(name=name, args=args, id=call_id)],
+        usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    )
+
+
+class _StaticGraphModel:
+    """A LanguageModelLike stand-in that pops a fixed AIMessage per call --
+    the graph-strategy equivalent of ScriptedModel."""
+
+    def __init__(self, responses: list[AIMessage]) -> None:
+        self._responses = list(responses)
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        return self._responses.pop(0)
+
+
+def _registry(settings: Settings) -> ToolRegistry:
+    return build_default_registry(settings)
+
+
+def _case(
+    case_id: str,
+    scenario: str = "false_alarm",
+    seed: int = 42,
+    role: str = "viewer",
+    approval_policy: ApprovalPolicy = "approve_all",
+) -> EvalCase:
+    return EvalCase.model_validate(
+        {
+            "id": case_id,
+            "scenario": scenario,
+            "seed": seed,
+            "role": role,
+            "approval_policy": approval_policy,
+            "expect": {"outcome": "completed"},
+            "budgets": {
+                "max_steps": 12,
+                "max_tokens": 50_000,
+                "max_cost_usd": 0.15,
+                "max_latency_s": 90,
+            },
+        }
+    )
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return Settings(
+        anthropic_api_key="unused",
+        opspilot_model="claude-sonnet-5",
+        opspilot_max_steps=10,
+        opspilot_token_budget=60_000,
+        opspilot_tool_output_max_chars=4_000,
+    )
+
+
+class _RawCrashingModel:
+    async def create(self, system: object, messages: object, tools: object) -> ModelResponse:
+        raise RuntimeError("boom")
+
+
+class _Counter:
+    def __init__(self) -> None:
+        self.current = 0
+        self.max_seen = 0
+        self.lock = asyncio.Lock()
+
+
+class _TrackingGraphModel:
+    """Records how many trials are inside `.ainvoke()` at once, via a
+    counter shared across every trial's own model instance."""
+
+    def __init__(self, responses: list[AIMessage], counter: _Counter) -> None:
+        self._responses = list(responses)
+        self._counter = counter
+
+    async def ainvoke(self, messages: list) -> AIMessage:  # noqa: ANN401
+        async with self._counter.lock:
+            self._counter.current += 1
+            self._counter.max_seen = max(self._counter.max_seen, self._counter.current)
+        await asyncio.sleep(0.02)
+        async with self._counter.lock:
+            self._counter.current -= 1
+        return self._responses.pop(0)
+
+
+# --- _resolve_decision ---
+
+
+def test_resolve_decision_approve_all() -> None:
+    decision = _resolve_decision("approve_all", "restart_service")
+
+    assert decision == {"decision": "approve", "approver": "eval-runner"}
+
+
+def test_resolve_decision_reject_all() -> None:
+    decision = _resolve_decision("reject_all", "restart_service")
+
+    assert decision["decision"] == "reject"
+
+
+def test_resolve_decision_scripted_dict() -> None:
+    policy: ApprovalPolicy = {"restart_service": "approve", "rollback_config": "reject"}
+
+    assert _resolve_decision(policy, "restart_service")["decision"] == "approve"
+    assert _resolve_decision(policy, "rollback_config")["decision"] == "reject"
+
+
+def test_resolve_decision_scripted_missing_tool_raises() -> None:
+    policy: ApprovalPolicy = {"rollback_config": "approve"}
+
+    with pytest.raises(ValueError, match="doesn't cover tool"):
+        _resolve_decision(policy, "restart_service")
+
+
+# --- run_trial ---
+
+
+async def test_run_trial_raw_strategy_completes(tmp_path: Path, settings: Settings) -> None:
+    case = _case("raw-happy")
+    model = ScriptedModel([_tool_use("submit_report", _REPORT_INPUT)])
+    store = MemoryStore()
+
+    trial = await run_trial(
+        case,
+        0,
+        sweep_id="sweep-1",
+        suite="golden",
+        strategy="raw",
+        mode="live",
+        settings=settings,
+        registry=_registry(settings),
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_raw_model=lambda _settings: model,
+    )
+
+    assert trial.error is None
+    assert trial.outcome == "completed"
+    assert trial.tool_calls
+    assert trial.cost_usd is not None
+    assert trial.latency_s is not None and trial.latency_s >= 0
+    assert trial.sandbox_snapshot
+
+    persisted = await store.list_eval_runs()
+    assert len(persisted) == 1
+    assert persisted[0].trial_id == trial.trial_id
+
+
+async def test_run_trial_graph_strategy_auto_approves_and_executes(
+    tmp_path: Path, settings: Settings
+) -> None:
+    case = _case("graph-approve", scenario="checkout_pool_exhaustion", role="operator")
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    submit = _tool_call_message("submit_report", _REPORT_INPUT, call_id="b")
+    store = MemoryStore()
+
+    trial = await run_trial(
+        case,
+        0,
+        sweep_id="sweep-1",
+        suite="golden",
+        strategy="graph",
+        mode="live",
+        settings=settings,
+        registry=_registry(settings),
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_graph_model=lambda _s, _r: _StaticGraphModel([restart, submit]),
+    )
+
+    assert trial.error is None
+    assert trial.outcome == "completed"
+    assert trial.tool_calls[0]["name"] == "restart_service"
+    assert trial.tool_calls[0]["ok"] is True
+
+
+async def test_run_trial_graph_strategy_reject_all_escalates(
+    tmp_path: Path, settings: Settings
+) -> None:
+    case = _case(
+        "graph-reject",
+        scenario="checkout_pool_exhaustion",
+        role="operator",
+        approval_policy="reject_all",
+    )
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    escalate = _tool_call_message("escalate", {"reason": "rejected"}, call_id="b")
+    store = MemoryStore()
+
+    trial = await run_trial(
+        case,
+        0,
+        sweep_id="sweep-1",
+        suite="golden",
+        strategy="graph",
+        mode="live",
+        settings=settings,
+        registry=_registry(settings),
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_graph_model=lambda _s, _r: _StaticGraphModel([restart, escalate]),
+    )
+
+    assert trial.error is None
+    assert trial.outcome == "escalated"
+    assert trial.tool_calls[0]["ok"] is False
+
+
+async def test_run_trial_scripted_policy_missing_tool_records_error(
+    tmp_path: Path, settings: Settings
+) -> None:
+    case = _case(
+        "graph-scripted-gap",
+        scenario="checkout_pool_exhaustion",
+        role="operator",
+        approval_policy={"rollback_config": "approve"},
+    )
+    restart = _tool_call_message("restart_service", {"service": "checkout"}, call_id="a")
+    store = MemoryStore()
+
+    trial = await run_trial(
+        case,
+        0,
+        sweep_id="sweep-1",
+        suite="golden",
+        strategy="graph",
+        mode="live",
+        settings=settings,
+        registry=_registry(settings),
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_graph_model=lambda _s, _r: _StaticGraphModel([restart]),
+    )
+
+    assert trial.error is not None
+    assert "doesn't cover tool" in trial.error
+    assert trial.outcome is None
+
+
+async def test_run_trial_records_runner_crash_without_raising(
+    tmp_path: Path, settings: Settings
+) -> None:
+    case = _case("raw-crash")
+    store = MemoryStore()
+
+    trial = await run_trial(
+        case,
+        0,
+        sweep_id="sweep-1",
+        suite="golden",
+        strategy="raw",
+        mode="live",
+        settings=settings,
+        registry=_registry(settings),
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_raw_model=lambda _settings: _RawCrashingModel(),
+    )
+
+    assert trial.error is not None
+    assert "RuntimeError: boom" in trial.error
+    assert trial.outcome is None
+    assert await store.list_eval_runs() == [trial]
+
+
+async def test_run_trial_rejects_non_live_mode(tmp_path: Path, settings: Settings) -> None:
+    case = _case("replay-not-yet")
+    store = MemoryStore()
+
+    with pytest.raises(NotImplementedError, match="3.3"):
+        await run_trial(
+            case,
+            0,
+            sweep_id="sweep-1",
+            suite="golden",
+            strategy="raw",
+            mode="replay",
+            settings=settings,
+            registry=_registry(settings),
+            store=store,
+            git_sha="abc123",
+            base_root=tmp_path,
+        )
+
+
+# --- run_suite ---
+
+
+async def test_run_suite_isolates_sandboxes_per_trial(tmp_path: Path, settings: Settings) -> None:
+    case = _case("iso")
+
+    def build_raw_model(_settings: Settings) -> ScriptedModel:
+        return ScriptedModel([_tool_use("submit_report", _REPORT_INPUT)])
+
+    store = MemoryStore()
+
+    trials = await run_suite(
+        [case],
+        k=2,
+        strategy="raw",
+        mode="live",
+        concurrency=2,
+        suite="golden",
+        settings=settings,
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_raw_model=build_raw_model,
+    )
+
+    assert len(trials) == 2
+    assert len({t.run_id for t in trials}) == 2
+    for trial in trials:
+        sandbox_dir = tmp_path / trial.sweep_id / case.id / f"trial-{trial.trial}"
+        assert (sandbox_dir / "state.json").exists()
+
+
+async def test_run_suite_respects_concurrency_limit(tmp_path: Path, settings: Settings) -> None:
+    case = _case("conc", scenario="checkout_pool_exhaustion", role="admin")
+    counter = _Counter()
+
+    def build_graph_model(_settings: Settings, _registry: object) -> _TrackingGraphModel:
+        submit = _tool_call_message("submit_report", _REPORT_INPUT)
+        return _TrackingGraphModel([submit], counter)
+
+    store = MemoryStore()
+
+    await run_suite(
+        [case],
+        k=6,
+        strategy="graph",
+        mode="live",
+        concurrency=2,
+        suite="golden",
+        settings=settings,
+        store=store,
+        git_sha="abc123",
+        base_root=tmp_path,
+        build_graph_model=build_graph_model,
+    )
+
+    assert 1 <= counter.max_seen <= 2

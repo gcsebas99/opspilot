@@ -1,6 +1,6 @@
 from typing import Any
 
-from opspilot.store.models import ApprovalDoc, AuditDoc, RunDoc, SpanDoc
+from opspilot.store.models import ApprovalDoc, AuditDoc, EvalTrialDoc, RunDoc, SpanDoc
 
 
 class MemoryStore:
@@ -13,6 +13,7 @@ class MemoryStore:
         self._spans: list[SpanDoc] = []
         self._audit: list[AuditDoc] = []
         self._approvals: dict[str, ApprovalDoc] = {}
+        self._eval_runs: dict[str, EvalTrialDoc] = {}
 
     async def ensure_indexes(self) -> None:
         pass  # nothing to index on plain dicts/lists
@@ -64,6 +65,23 @@ class MemoryStore:
 
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         return [a for a in self._approvals.values() if a.status == "pending"]
+
+    async def insert_eval_run(self, trial: EvalTrialDoc) -> None:
+        self._eval_runs[trial.trial_id] = trial
+
+    async def list_eval_runs(self, sweep_id: str | None = None) -> list[EvalTrialDoc]:
+        trials = (
+            self._eval_runs.values()
+            if sweep_id is None
+            else (t for t in self._eval_runs.values() if t.sweep_id == sweep_id)
+        )
+        return sorted(trials, key=lambda t: (t.case_id, t.trial))
+
+    async def update_eval_run(self, trial_id: str, updates: dict[str, Any]) -> None:
+        existing = self._eval_runs.get(trial_id)
+        if existing is None:
+            raise KeyError(f"no eval trial {trial_id!r} to update")
+        self._eval_runs[trial_id] = existing.model_copy(update=updates)
 
     async def model_call_latency_percentiles(self) -> dict[str, float]:
         durations = sorted(

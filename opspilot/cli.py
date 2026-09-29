@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,8 @@ import typer
 from langchain_anthropic import ChatAnthropic
 from rich.console import Console
 
+from evals.loader import load_cases
+from evals.runner import run_suite
 from opspilot.config import get_settings
 from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.cli import app as env_app
@@ -526,6 +529,96 @@ async def _audit_verify_async() -> None:
         f"{result.broken_at_index} of {result.total_entries} ({result.reason})"
     )
     raise typer.Exit(code=1)
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+@app.command("eval")
+def eval_command(
+    suite: str = typer.Option("golden", "--suite", help="golden (all cases) or a tag filter."),
+    k: int = typer.Option(1, "--k", help="Trials per case."),
+    strategy: str = typer.Option("graph", "--strategy", help="Loop implementation: raw or graph."),
+    mode: str = typer.Option(
+        "live", "--mode", help="live (real API) -- record/replay land in 3.3."
+    ),
+    concurrency: int = typer.Option(4, "--concurrency", help="Max trials running at once."),
+) -> None:
+    """Run a suite of golden eval cases and persist every trial."""
+    if strategy not in ("raw", "graph"):
+        console.print(f"[red]--strategy must be 'raw' or 'graph', got {strategy!r}[/red]")
+        raise typer.Exit(code=1)
+    if mode not in ("live", "record", "replay"):
+        console.print(f"[red]--mode must be 'live', 'record', or 'replay', got {mode!r}[/red]")
+        raise typer.Exit(code=1)
+    asyncio.run(_eval_async(suite, k, strategy, mode, concurrency))  # type: ignore[arg-type]
+
+
+async def _eval_async(
+    suite: str,
+    k: int,
+    strategy: Literal["raw", "graph"],
+    mode: Literal["live", "record", "replay"],
+    concurrency: int,
+) -> None:
+    settings = get_settings()
+    store = build_store(settings)
+    await store.ensure_indexes()
+
+    cases = load_cases(suite)  # type: ignore[arg-type]
+    if not cases:
+        console.print(f"[yellow]no cases found for suite {suite!r}[/yellow]")
+        raise typer.Exit(code=1)
+
+    git_sha = _git_sha()
+    console.print(
+        f"[bold]suite:[/bold] {suite}  [bold]cases:[/bold] {len(cases)}  [bold]k:[/bold] {k}  "
+        f"[bold]trials:[/bold] {len(cases) * k}"
+    )
+    console.print(
+        f"[dim]strategy={strategy} mode={mode} concurrency={concurrency} git_sha={git_sha}[/dim]\n"
+    )
+
+    trials = await run_suite(
+        cases,
+        k=k,
+        strategy=strategy,
+        mode=mode,
+        concurrency=concurrency,
+        suite=suite,
+        settings=settings,
+        store=store,
+        git_sha=git_sha,
+    )
+
+    ok_count = 0
+    for trial in sorted(trials, key=lambda t: (t.case_id, t.trial)):
+        # Rich's `console.print` treats "[...]" as a (possibly unknown)
+        # style tag and silently drops it -- a case_id in brackets would
+        # vanish from the output rather than error, which is exactly what
+        # happened here until this was caught by an actual live run.
+        label = f"{trial.case_id}#{trial.trial}"
+        if trial.error is not None:
+            console.print(f"[red]{label} ERROR:[/red] {trial.error}")
+            continue
+        ok_count += 1
+        console.print(
+            f"{label} outcome={trial.outcome} "
+            f"cost=${trial.cost_usd or 0:.4f} latency={trial.latency_s or 0:.1f}s"
+        )
+
+    console.print(f"\n[bold]sweep_id:[/bold] {trials[0].sweep_id}")
+    console.print(f"{ok_count}/{len(trials)} trials completed without runner errors.")
+    console.print("[dim](Grading lands in 3.4 -- pass/fail isn't reported yet.)[/dim]")
 
 
 if __name__ == "__main__":

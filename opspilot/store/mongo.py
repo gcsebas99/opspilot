@@ -3,7 +3,7 @@ from typing import Any
 import pymongo
 from pymongo import AsyncMongoClient
 
-from opspilot.store.models import ApprovalDoc, AuditDoc, RunDoc, SpanDoc
+from opspilot.store.models import ApprovalDoc, AuditDoc, EvalTrialDoc, RunDoc, SpanDoc
 
 
 class MongoStore:
@@ -53,6 +53,8 @@ class MongoStore:
         await self._db.audit_log.create_index([("run_id", pymongo.ASCENDING)])
         await self._db.approvals.create_index([("status", pymongo.ASCENDING)])
         await self._db.approvals.create_index([("run_id", pymongo.ASCENDING)])
+        await self._db.eval_runs.create_index([("sweep_id", pymongo.ASCENDING)])
+        await self._db.eval_runs.create_index([("case_id", pymongo.ASCENDING)])
 
     async def insert_run(self, run: RunDoc) -> None:
         await self._db.runs.insert_one(run.model_dump())
@@ -113,6 +115,24 @@ class MongoStore:
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         docs = [doc async for doc in self._db.approvals.find({"status": "pending"})]
         return [ApprovalDoc.model_validate(doc) for doc in docs]
+
+    async def insert_eval_run(self, trial: EvalTrialDoc) -> None:
+        await self._db.eval_runs.insert_one(trial.model_dump())
+
+    async def list_eval_runs(self, sweep_id: str | None = None) -> list[EvalTrialDoc]:
+        query = {} if sweep_id is None else {"sweep_id": sweep_id}
+        docs = [
+            doc
+            async for doc in self._db.eval_runs.find(
+                query, sort=[("case_id", pymongo.ASCENDING), ("trial", pymongo.ASCENDING)]
+            )
+        ]
+        return [EvalTrialDoc.model_validate(doc) for doc in docs]
+
+    async def update_eval_run(self, trial_id: str, updates: dict[str, Any]) -> None:
+        result = await self._db.eval_runs.update_one({"trial_id": trial_id}, {"$set": updates})
+        if result.matched_count == 0:
+            raise KeyError(f"no eval trial {trial_id!r} to update")
 
     # [HARNESS:OBS] Real Mongo aggregation pipelines, not fetch-then-compute.
     # WHY: $percentile (MongoDB 7+, confirmed against the project's own
