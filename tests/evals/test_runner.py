@@ -181,6 +181,10 @@ async def test_run_trial_raw_strategy_completes(tmp_path: Path, settings: Settin
     assert trial.cost_usd is not None
     assert trial.latency_s is not None and trial.latency_s >= 0
     assert trial.sandbox_snapshot
+    assert trial.steps == 1
+    assert trial.tokens["output_tokens"] == 5
+    assert trial.sandbox_facts["checkout.status"] == "healthy"
+    assert trial.policy_events == []
 
     persisted = await store.list_eval_runs()
     assert len(persisted) == 1
@@ -214,6 +218,15 @@ async def test_run_trial_graph_strategy_auto_approves_and_executes(
     assert trial.outcome == "completed"
     assert trial.tool_calls[0]["name"] == "restart_service"
     assert trial.tool_calls[0]["ok"] is True
+    # 3.4a: everything graders need is on the trial itself.
+    assert trial.steps == 2
+    assert trial.tokens["input_tokens"] == 20
+    assert trial.sandbox_facts["checkout.restarted"] is True
+    assert trial.sandbox_facts["checkout.config_version"] == 13
+    assert {"action": "approval_decision", "target": "restart_service", "decision": "approve"} in (
+        trial.policy_events
+    )
+    assert any(e["action"] == "destructive_tool_executed" for e in trial.policy_events)
 
 
 async def test_run_trial_graph_strategy_reject_all_escalates(

@@ -76,7 +76,16 @@ def test_rollback_deploy_reverts_to_previous_version(tmp_path: Path) -> None:
 
 
 def test_rollback_deploy_no_earlier_deploy(payments_sandbox: Sandbox) -> None:
-    result = _registry().execute("rollback_deploy", {"service": "payments"}, payments_sandbox)
+    # web has a single (noise) deploy; payments now has a known-good 2.3.0 before 2.3.1.
+    result = _registry().execute("rollback_deploy", {"service": "web"}, payments_sandbox)
 
     assert result.ok is False
     assert "no earlier deploy" in result.content
+
+
+def test_rollback_deploy_fixes_the_real_payments_scenario(payments_sandbox: Sandbox) -> None:
+    """The scenario's expected_fix must actually be executable in its own sandbox."""
+    result = _registry().execute("rollback_deploy", {"service": "payments"}, payments_sandbox)
+
+    assert result.ok is True
+    assert "2.3.0" in result.content

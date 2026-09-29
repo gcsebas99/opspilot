@@ -112,6 +112,16 @@ class EvalTrialDoc(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     report: dict[str, Any] | None = None
     sandbox_snapshot: dict[str, str] = Field(default_factory=dict)
+    # Everything below (through latency_s) exists so graders (3.4) are pure
+    # functions of (case, trial) -- no sandbox or store access needed, so a
+    # stored sweep can be re-graded later, even from an in-memory store run.
+    sandbox_facts: dict[str, Any] = Field(default_factory=dict)
+    # Policy-relevant audit entries for this run (approval decisions,
+    # permission denials, executed destructive tools), as {action, target,
+    # decision} -- the system's own record, not the runner's bookkeeping.
+    policy_events: list[dict[str, str]] = Field(default_factory=list)
+    steps: int | None = None
+    tokens: dict[str, int] = Field(default_factory=dict)
     cost_usd: float | None = None
     latency_s: float | None = None
     # Populated by the graders (3.4) in a separate pass -- left empty here

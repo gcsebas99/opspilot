@@ -82,6 +82,17 @@ def _resolve_decision(policy: ApprovalPolicy, tool: str) -> dict[str, Any]:
     }
 
 
+_POLICY_ACTIONS = {"approval_decision", "permission_denied", "destructive_tool_executed"}
+
+
+async def _policy_events(store: Store, run_id: str) -> list[dict[str, str]]:
+    return [
+        {"action": entry.action, "target": entry.target, "decision": entry.decision}
+        for entry in await store.list_audit(run_id)
+        if entry.action in _POLICY_ACTIONS
+    ]
+
+
 async def run_trial(
     case: EvalCase,
     trial: int,
@@ -258,6 +269,10 @@ async def run_trial(
                 "tool_calls": [tc.model_dump() for tc in result.tool_calls],
                 "report": result.report,
                 "sandbox_snapshot": result.sandbox_snapshot,
+                "sandbox_facts": sandbox.facts(),
+                "policy_events": await _policy_events(store, run_id),
+                "steps": result.steps,
+                "tokens": result.tokens.model_dump(),
                 "cost_usd": cost,
                 "latency_s": latency_s,
             }

@@ -1,7 +1,10 @@
 import hashlib
+import json
 import shutil
 from pathlib import Path
+from typing import Any
 
+import yaml
 from pydantic import BaseModel
 
 
@@ -49,6 +52,40 @@ class Sandbox(BaseModel):
                 digest = hashlib.sha256(target.read_bytes()).hexdigest()
                 hashes[str(target.relative_to(self.root))] = digest
         return hashes
+
+    # [HARNESS:EVAL] Readable end state, not just hashes -- what graders check.
+    # WHY: snapshot() says *whether* files changed; a grader asserting
+    # "checkout ended on config v12" needs *what* they say. Flat dotted keys
+    # ("checkout.config_version") keep final_state expectations in YAML
+    # trivial, and capturing this at trial end means stored trials can be
+    # re-graded later without the (deleted) sandbox.
+    # INTERVIEW: "How do you grade side effects, not just the answer?" ->
+    # diff the environment's final state against an expected state.
+    def facts(self) -> dict[str, Any]:
+        facts: dict[str, Any] = {}
+        state_path = self.root / "state.json"
+        if state_path.exists():
+            for service, fields in json.loads(state_path.read_text()).items():
+                for key, value in fields.items():
+                    # restarted_at is wall-clock -- only "was it restarted" is a fact.
+                    if key == "restarted_at":
+                        facts[f"{service}.restarted"] = True
+                    else:
+                        facts[f"{service}.{key}"] = value
+        for config_path in sorted((self.root / "config").glob("*.yaml")):
+            config = yaml.safe_load(config_path.read_text()) or {}
+            service = config_path.stem
+            facts[f"{service}.config_version"] = config.get("version")
+            for key, value in config.items():
+                if key != "version":
+                    facts[f"{service}.config.{key}"] = value
+        deploys_path = self.root / "deploys.json"
+        if deploys_path.exists():
+            # Append order, not ts: rollback_deploy appends the entry that
+            # becomes current, so the last entry per service is live.
+            for deploy in json.loads(deploys_path.read_text()):
+                facts[f"{deploy['service']}.deploy_version"] = deploy["version"]
+        return facts
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)

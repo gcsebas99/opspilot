@@ -91,8 +91,7 @@ def test_list_deploys_filtered_by_service(payments_sandbox: Sandbox) -> None:
 
     assert result.ok is True
     assert result.data is not None
-    assert len(result.data["deploys"]) == 1
-    assert result.data["deploys"][0]["version"] == "2.3.1"
+    assert {d["version"] for d in result.data["deploys"]} == {"2.3.0", "2.3.1"}
 
 
 def test_list_deploys_all_services(payments_sandbox: Sandbox) -> None:
@@ -100,7 +99,7 @@ def test_list_deploys_all_services(payments_sandbox: Sandbox) -> None:
 
     assert result.ok is True
     assert result.data is not None
-    assert len(result.data["deploys"]) >= 4  # 3 boring noise deploys + the payments one
+    assert len(result.data["deploys"]) >= 4  # 3 boring noise deploys + 2 payments deploys
 
 
 def test_load_runbook_known_name(checkout_sandbox: Sandbox) -> None:

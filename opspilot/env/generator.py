@@ -158,6 +158,17 @@ def _build_payments_bad_deploy(
     state: State,
 ) -> None:
     deploy_minute = 35
+    # The last known-good deploy -- without it rollback_deploy(payments), this
+    # scenario's expected_fix, has nothing to roll back to. Fixed timestamp,
+    # no rng draw, so other scenarios' generated data is unchanged.
+    deploys.append(
+        {
+            "service": "payments",
+            "version": "2.3.0",
+            "ts": _fmt_ts(EPOCH + timedelta(minutes=2)),
+            "author": "bob",
+        }
+    )
     deploys.append(
         {
             "service": "payments",
