@@ -47,6 +47,9 @@ class ModelClient(Protocol):
     API?" -> the loop depends on this Protocol, not a concrete client;
     tests inject ScriptedModel, which returns a scripted list of
     ModelResponse and drives every exit condition deterministically.
+
+    `tool_choice` is optional and only the LLM judge (evals/graders/judge.py)
+    sets it, to force a structured answer; the agent loops never do.
     """
 
     async def create(
@@ -54,4 +57,5 @@ class ModelClient(Protocol):
         system: list[dict[str, Any]] | str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | None = None,
     ) -> ModelResponse: ...

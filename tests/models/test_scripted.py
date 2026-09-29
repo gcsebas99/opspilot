@@ -31,7 +31,12 @@ async def test_records_calls() -> None:
     )
 
     assert model.calls == [
-        {"system": "sys", "messages": [{"role": "user", "content": "hi"}], "tools": [{"name": "x"}]}
+        {
+            "system": "sys",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "x"}],
+            "tool_choice": None,
+        }
     ]
 
 

@@ -82,6 +82,7 @@ class AnthropicModel:
         system: list[dict[str, Any]] | str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | None = None,
     ) -> ModelResponse:
         retrying = AsyncRetrying(
             retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
@@ -99,6 +100,10 @@ class AnthropicModel:
         # dicts so every backend (real/scripted/replay) shares one loose
         # Protocol. We know these dicts are shaped correctly at runtime --
         # cast at this one boundary rather than tighten the Protocol.
+        # Only sent when set -- omitting it keeps the default ("auto"), which
+        # is what the agent loops rely on.
+        extra: dict[str, Any] = {} if tool_choice is None else {"tool_choice": tool_choice}
+
         async def _call() -> Any:
             return await self._client.messages.create(
                 model=self._model,
@@ -106,6 +111,7 @@ class AnthropicModel:
                 system=cast(Any, system),
                 messages=cast(Any, messages),
                 tools=cast(Any, tools),
+                **extra,
             )
 
         start = time.monotonic()

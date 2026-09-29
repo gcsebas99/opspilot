@@ -155,3 +155,30 @@ async def test_tool_use_blocks_survive_serialization(tmp_path: Path) -> None:
         system="sys", messages=messages, tools=TOOLS
     )
     assert replayed == response
+
+
+def test_tool_choice_only_keys_the_hash_when_set() -> None:
+    messages = [{"role": "user", "content": "hi"}]
+    plain = request_key(normalize_request(MODEL, "sys", messages, TOOLS))
+    explicit_none = request_key(normalize_request(MODEL, "sys", messages, TOOLS, None))
+    forced = request_key(
+        normalize_request(MODEL, "sys", messages, TOOLS, {"type": "tool", "name": "get_logs"})
+    )
+    # Pre-existing cassettes (recorded without tool_choice) keep their keys.
+    assert plain == explicit_none
+    assert forced != plain
+
+
+async def test_tool_choice_reaches_inner_client_and_replays(tmp_path: Path) -> None:
+    path = tmp_path / "0.jsonl"
+    choice = {"type": "tool", "name": "get_logs"}
+    inner = ScriptedModel([_text("forced")])
+    await RecordingModel(inner, Cassette(path), MODEL).create(
+        system="sys", messages=[], tools=TOOLS, tool_choice=choice
+    )
+    assert inner.calls[0]["tool_choice"] == choice
+
+    replay = ReplayModel(Cassette(path), MODEL)
+    assert (await replay.create(system="sys", messages=[], tools=TOOLS, tool_choice=choice)).content
+    with pytest.raises(CassetteMiss, match=r"\.tool_choice"):
+        await replay.create(system="sys", messages=[], tools=TOOLS)

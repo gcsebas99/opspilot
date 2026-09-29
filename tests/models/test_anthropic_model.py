@@ -1,3 +1,5 @@
+import json
+
 import anthropic
 import httpx2
 import pytest
@@ -131,3 +133,22 @@ async def test_normalizes_tool_use_blocks() -> None:
     assert block.type == "tool_use"
     assert block.id == "toolu_1"
     assert block.name == "list_services"
+
+
+@pytest.mark.parametrize("tool_choice", [None, {"type": "tool", "name": "submit_grades"}])
+async def test_tool_choice_is_sent_only_when_set(tool_choice: dict[str, str] | None) -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(200, json=_MESSAGE_JSON)
+
+    model = AnthropicModel(client=_client(handler), model="claude-opus-5")
+    await model.create(
+        system="s", messages=[{"role": "user", "content": "hi"}], tools=[], tool_choice=tool_choice
+    )
+
+    if tool_choice is None:
+        assert "tool_choice" not in bodies[0]
+    else:
+        assert bodies[0]["tool_choice"] == tool_choice

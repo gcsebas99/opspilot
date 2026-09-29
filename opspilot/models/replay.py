@@ -25,8 +25,9 @@ class ReplayModel:
         system: list[dict[str, Any]] | str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | None = None,
     ) -> ModelResponse:
-        request = normalize_request(self._model, system, messages, tools)
+        request = normalize_request(self._model, system, messages, tools, tool_choice)
         entry = self._cassette.get(request_key(request))
         if entry is None:
             raise CassetteMiss(self._cassette.explain_miss(request))

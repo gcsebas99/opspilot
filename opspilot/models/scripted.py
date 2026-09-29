@@ -22,6 +22,7 @@ class ScriptedModel:
         system: list[dict[str, Any]] | str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | None = None,
     ) -> ModelResponse:
         # Snapshot (shallow-copy) the list arguments -- the loop keeps
         # mutating its `messages` list via .append() on every turn, so
@@ -33,6 +34,7 @@ class ScriptedModel:
                 "system": list(system) if isinstance(system, list) else system,
                 "messages": list(messages),
                 "tools": list(tools),
+                "tool_choice": tool_choice,
             }
         )
         if self._index >= len(self._responses):

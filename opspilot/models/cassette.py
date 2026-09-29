@@ -69,11 +69,20 @@ def normalize_request(
     system: list[dict[str, Any]] | str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    tool_choice: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ids = _collect_tool_use_ids(messages)
-    normalized: dict[str, Any] = _normalize_value(
-        {"model": model, "system": system, "messages": messages, "tools": tools}, ids
-    )
+    request: dict[str, Any] = {
+        "model": model,
+        "system": system,
+        "messages": messages,
+        "tools": tools,
+    }
+    # Only keyed when set, so every cassette recorded before tool_choice
+    # existed (all agent calls) keeps its hash.
+    if tool_choice is not None:
+        request["tool_choice"] = tool_choice
+    normalized: dict[str, Any] = _normalize_value(request, ids)
     return normalized
 
 
