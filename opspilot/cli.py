@@ -549,7 +549,10 @@ def eval_command(
     k: int = typer.Option(1, "--k", help="Trials per case."),
     strategy: str = typer.Option("graph", "--strategy", help="Loop implementation: raw or graph."),
     mode: str = typer.Option(
-        "live", "--mode", help="live (real API) -- record/replay land in 3.3."
+        "live",
+        "--mode",
+        help="live (real API), record (API on cassette miss, saves responses), "
+        "replay (cassettes only, no network, $0).",
     ),
     concurrency: int = typer.Option(4, "--concurrency", help="Max trials running at once."),
 ) -> None:
@@ -618,7 +621,15 @@ async def _eval_async(
 
     console.print(f"\n[bold]sweep_id:[/bold] {trials[0].sweep_id}")
     console.print(f"{ok_count}/{len(trials)} trials completed without runner errors.")
+    if mode == "replay":
+        console.print(
+            "[dim]replay: costs shown are what the recorded calls cost; spend was $0.[/dim]"
+        )
     console.print("[dim](Grading lands in 3.4 -- pass/fail isn't reported yet.)[/dim]")
+    # Non-zero exit on any runner error -- in replay that includes every
+    # cassette miss, which is what lets CI (3.7) fail on prompt drift.
+    if ok_count < len(trials):
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

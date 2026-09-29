@@ -1,14 +1,10 @@
 import asyncio
 import time
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import anthropic
-from langchain_anthropic import ChatAnthropic
-from langchain_core.language_models import LanguageModelLike
 from langgraph.checkpoint.memory import InMemorySaver
 
 from evals.models import ApprovalPolicy, EvalCase
@@ -18,8 +14,15 @@ from opspilot.env.generator import build_sandbox
 from opspilot.env.scenarios import get_scenario
 from opspilot.loops.graph import resume_react_graph, run_react_graph
 from opspilot.loops.react_raw import LoopEvent, run_react_loop
-from opspilot.models.anthropic_model import AnthropicModel
-from opspilot.models.base import ModelClient
+from opspilot.models.factory import (
+    LiveChatFactory,
+    LiveClientFactory,
+    ModelMode,
+    build_chat_model,
+    build_model_client,
+    default_live_chat_model,
+    default_live_client,
+)
 from opspilot.observability.audit import record_loop_audit
 from opspilot.observability.instrumentation import record_loop_spans
 from opspilot.observability.pricing import cost_usd
@@ -30,29 +33,23 @@ from opspilot.tools.base import ToolRegistry
 from opspilot.tools.registry import build_default_registry
 
 Strategy = Literal["raw", "graph"]
-Mode = Literal["live", "record", "replay"]
+Mode = ModelMode
 
 DEFAULT_BASE_ROOT = Path("tmp/eval_runs")
 
 
-# [HARNESS:EVAL] Model construction is injectable, not inlined -- unlike
-# cli.py's `opspilot run` (a one-shot command where inlining is fine), the
-# runner's whole job is to be called many times from tests and from 3.3's
-# record/replay modes. Two separate factories (not one returning a Union)
-# keep each strategy branch narrowly typed and let a test swap in a
-# ScriptedModel/FakeMessagesListChatModel exactly the way every other loop
-# test in this project already does -- "unit tests never call the real
-# Anthropic API" applies to the runner too.
-def _default_raw_model(settings: Settings) -> ModelClient:
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0)
-    return AnthropicModel(client=client, model=settings.opspilot_model)
+DEFAULT_CASSETTE_ROOT = Path("evals/cassettes")
 
 
-def _default_graph_model(settings: Settings, registry: ToolRegistry) -> LanguageModelLike:
-    chat_model = ChatAnthropic(
-        model=settings.opspilot_model, max_tokens=8192, api_key=settings.anthropic_api_key
-    )
-    return chat_model.bind_tools(registry.to_anthropic_schema())
+# [HARNESS:EVAL] Model construction is injectable, not inlined -- the
+# runner's whole job is to be called many times, from tests and from every
+# mode. The injected factories build only the *live* backend; the runner
+# wraps it per mode (opspilot/models/factory.py), so a test can record with
+# a ScriptedModel as the "live" model and then replay the resulting cassette.
+def cassette_path(cassette_root: Path, case_id: str, trial: int) -> Path:
+    # One file per (case, trial): k trials are k independent samples, and
+    # trials never share a writer when they run concurrently.
+    return cassette_root / case_id / f"{trial}.jsonl"
 
 
 # [HARNESS:EVAL] Approval auto-resolution -- what a human's interactive
@@ -98,8 +95,9 @@ async def run_trial(
     store: Store,
     git_sha: str,
     base_root: Path,
-    build_raw_model: Callable[[Settings], ModelClient] = _default_raw_model,
-    build_graph_model: Callable[[Settings, ToolRegistry], LanguageModelLike] = _default_graph_model,
+    cassette_root: Path = DEFAULT_CASSETTE_ROOT,
+    build_raw_model: LiveClientFactory = default_live_client,
+    build_graph_model: LiveChatFactory = default_live_chat_model,
 ) -> EvalTrialDoc:
     """Run one (case, trial) to completion and persist the result.
 
@@ -108,11 +106,6 @@ async def run_trial(
     catch broadly here, record the failure on the trial's own document, and
     let every other trial in the sweep keep going.
     """
-    if mode != "live":
-        raise NotImplementedError(
-            f"eval mode {mode!r} isn't implemented until 3.3 (RecordingModel/ReplayModel)"
-        )
-
     run_id = f"{sweep_id}:{case.id}:{trial}"
     started_at = datetime.now(UTC)
     started_monotonic = time.monotonic()
@@ -129,6 +122,7 @@ async def run_trial(
         prompt_version=prompt_version_value,
         model=settings.opspilot_model,
         strategy=strategy,
+        mode=mode,
         started_at=started_at,
     )
 
@@ -155,7 +149,9 @@ async def run_trial(
         )
 
         if strategy == "raw":
-            raw_model = build_raw_model(settings)
+            raw_model = build_model_client(
+                settings, mode, cassette_path(cassette_root, case.id, trial), build_raw_model
+            )
             events: list[LoopEvent] = []
             async with tracer.span(
                 "run",
@@ -187,7 +183,14 @@ async def run_trial(
                     model=settings.opspilot_model,
                 )
         else:
-            bound_model = build_graph_model(settings, registry)
+            bound_model = build_chat_model(
+                settings,
+                registry,
+                mode,
+                cassette_path(cassette_root, case.id, trial),
+                build_raw_model,
+                build_graph_model,
+            )
             # A fresh in-memory checkpointer per trial -- eval trials run
             # start-to-finish in this one process, so there's no need for
             # the cross-process durability Mongo's checkpointer exists for
@@ -283,8 +286,9 @@ async def run_suite(
     store: Store,
     git_sha: str,
     base_root: Path = DEFAULT_BASE_ROOT,
-    build_raw_model: Callable[[Settings], ModelClient] = _default_raw_model,
-    build_graph_model: Callable[[Settings, ToolRegistry], LanguageModelLike] = _default_graph_model,
+    cassette_root: Path = DEFAULT_CASSETTE_ROOT,
+    build_raw_model: LiveClientFactory = default_live_client,
+    build_graph_model: LiveChatFactory = default_live_chat_model,
 ) -> list[EvalTrialDoc]:
     """Run every case in `cases` for `k` trials each, `concurrency` at a
     time. One sweep = one call to this function -- `sweep_id` is what lets
@@ -311,6 +315,7 @@ async def run_suite(
                 store=store,
                 git_sha=git_sha,
                 base_root=sweep_root,
+                cassette_root=cassette_root,
                 build_raw_model=build_raw_model,
                 build_graph_model=build_graph_model,
             )

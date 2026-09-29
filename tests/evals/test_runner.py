@@ -6,11 +6,12 @@ import pytest
 from langchain_core.messages import AIMessage, ToolCall
 
 from evals.models import ApprovalPolicy, EvalCase
-from evals.runner import _resolve_decision, run_suite, run_trial
+from evals.runner import Mode, Strategy, _resolve_decision, run_suite, run_trial
 from opspilot.config import Settings
 from opspilot.models.base import ModelResponse, ToolUseBlock, Usage
 from opspilot.models.scripted import ScriptedModel
 from opspilot.store.memory import MemoryStore
+from opspilot.store.models import EvalTrialDoc
 from opspilot.tools.base import ToolRegistry
 from opspilot.tools.registry import build_default_registry
 
@@ -307,24 +308,130 @@ async def test_run_trial_records_runner_crash_without_raising(
     assert await store.list_eval_runs() == [trial]
 
 
-async def test_run_trial_rejects_non_live_mode(tmp_path: Path, settings: Settings) -> None:
-    case = _case("replay-not-yet")
-    store = MemoryStore()
+# --- record / replay (3.3c) ---
 
-    with pytest.raises(NotImplementedError, match="3.3"):
-        await run_trial(
-            case,
-            0,
-            sweep_id="sweep-1",
-            suite="golden",
-            strategy="raw",
-            mode="replay",
-            settings=settings,
-            registry=_registry(settings),
-            store=store,
-            git_sha="abc123",
-            base_root=tmp_path,
-        )
+
+def _no_live_client(_settings: Settings) -> ScriptedModel:
+    raise AssertionError("replay must never construct a live client")
+
+
+async def _run_mode(
+    case: EvalCase,
+    *,
+    strategy: Strategy,
+    mode: Mode,
+    tmp_path: Path,
+    live: ScriptedModel | None = None,
+) -> EvalTrialDoc:
+    settings = Settings(anthropic_api_key="", opspilot_model="claude-sonnet-5")
+    return await run_trial(
+        case,
+        0,
+        sweep_id=f"sweep-{mode}-{strategy}",
+        suite="golden",
+        strategy=strategy,
+        mode=mode,
+        settings=settings,
+        registry=_registry(settings),
+        store=MemoryStore(),
+        git_sha="abc123",
+        base_root=tmp_path / "sandboxes" / f"{mode}-{strategy}",
+        cassette_root=tmp_path / "cassettes",
+        build_raw_model=(lambda _s: live) if live is not None else _no_live_client,
+    )
+
+
+def _same_trial(a: EvalTrialDoc, b: EvalTrialDoc) -> None:
+    assert (a.outcome, a.tool_calls, a.report, a.sandbox_snapshot, a.cost_usd) == (
+        b.outcome,
+        b.tool_calls,
+        b.report,
+        b.sandbox_snapshot,
+        b.cost_usd,
+    )
+
+
+@pytest.mark.parametrize("strategy", ["raw", "graph"])
+async def test_record_then_replay_reproduces_the_trial(tmp_path: Path, strategy: Strategy) -> None:
+    case = _case("rr", scenario="checkout_pool_exhaustion")
+    live = ScriptedModel(
+        [
+            _tool_use("config_history", {"service": "checkout"}, "t1"),
+            _tool_use("submit_report", _REPORT_INPUT, "t2"),
+        ]
+    )
+
+    recorded = await _run_mode(case, strategy=strategy, mode="record", tmp_path=tmp_path, live=live)
+    replayed = await _run_mode(case, strategy=strategy, mode="replay", tmp_path=tmp_path)
+
+    assert recorded.error is None and replayed.error is None
+    assert (recorded.mode, replayed.mode) == ("record", "replay")
+    assert (tmp_path / "cassettes" / "rr" / "0.jsonl").exists()
+    _same_trial(recorded, replayed)
+
+
+async def test_graph_replay_resumes_through_hitl_approval(tmp_path: Path) -> None:
+    case = _case("rr-hitl", scenario="checkout_pool_exhaustion", role="operator")
+    live = ScriptedModel(
+        [
+            _tool_use("restart_service", {"service": "checkout"}, "t1"),
+            _tool_use("submit_report", _REPORT_INPUT, "t2"),
+        ]
+    )
+
+    recorded = await _run_mode(case, strategy="graph", mode="record", tmp_path=tmp_path, live=live)
+    replayed = await _run_mode(case, strategy="graph", mode="replay", tmp_path=tmp_path)
+
+    assert replayed.error is None
+    assert replayed.tool_calls[0]["name"] == "restart_service"
+    assert replayed.tool_calls[0]["ok"] is True
+    _same_trial(recorded, replayed)
+
+
+async def test_cassette_recorded_by_raw_replays_under_graph(tmp_path: Path) -> None:
+    case = _case("rr-cross", scenario="checkout_pool_exhaustion")
+    live = ScriptedModel(
+        [
+            _tool_use("list_services", {}, "t1"),
+            _tool_use("submit_report", _REPORT_INPUT, "t2"),
+        ]
+    )
+
+    recorded = await _run_mode(case, strategy="raw", mode="record", tmp_path=tmp_path, live=live)
+    replayed = await _run_mode(case, strategy="graph", mode="replay", tmp_path=tmp_path)
+
+    assert replayed.error is None
+    _same_trial(recorded, replayed)
+
+
+async def test_replay_without_cassette_is_a_loud_trial_error(tmp_path: Path) -> None:
+    trial = await _run_mode(
+        _case("never-recorded"), strategy="raw", mode="replay", tmp_path=tmp_path
+    )
+
+    assert trial.error is not None
+    assert "CassetteMiss" in trial.error
+    assert "record it first" in trial.error
+    assert trial.outcome is None
+
+
+async def test_replay_miss_when_the_run_diverges_from_the_recording(tmp_path: Path) -> None:
+    """A different case (other seed -> other tool output) against the same
+    cassette dir must miss, not silently serve the recorded conversation."""
+    live = ScriptedModel(
+        [
+            _tool_use("grep_logs", {"service": "checkout", "pattern": "."}, "t1"),
+            _tool_use("submit_report", _REPORT_INPUT, "t2"),
+        ]
+    )
+    recorded_case = _case("drift", scenario="checkout_pool_exhaustion", seed=42)
+    await _run_mode(recorded_case, strategy="raw", mode="record", tmp_path=tmp_path, live=live)
+
+    drifted_case = _case("drift", scenario="checkout_pool_exhaustion", seed=7)
+    trial = await _run_mode(drifted_case, strategy="raw", mode="replay", tmp_path=tmp_path)
+
+    assert trial.error is not None
+    assert "first differs at" in trial.error
 
 
 # --- run_suite ---

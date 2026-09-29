@@ -98,6 +98,10 @@ class EvalTrialDoc(BaseModel):
     prompt_version: str
     model: str
     strategy: Literal["raw", "graph"]
+    # In replay, cost_usd is what the recorded calls cost when captured (the
+    # actual spend is $0) and latency_s is near-zero wall-clock -- graders
+    # and reports need this to avoid reading replay numbers as live ones.
+    mode: Literal["live", "record", "replay"] = "live"
     started_at: datetime
     outcome: str | None = None
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
