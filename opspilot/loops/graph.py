@@ -107,10 +107,18 @@ def _make_agent_node(model: LanguageModelLike, tracer: Tracer) -> Any:
                 raise TypeError(f"expected AIMessage from model, got {type(response).__name__}")
             usage: dict[str, Any] = dict(response.usage_metadata or {})
             details: dict[str, Any] = dict(usage.get("input_token_details") or {})
-            input_tokens = usage.get("input_tokens", 0)
+            # LangChain's input_tokens is the TOTAL prompt (uncached + cache
+            # reads + cache writes) -- unlike Anthropic's raw usage, which is
+            # what TokenTotals/cost_usd expect. Subtract the cached parts so
+            # cached tokens aren't counted (and priced) twice. ChatAnthropic
+            # zeroes `cache_creation` when it reports the per-TTL split.
             output_tokens = usage.get("output_tokens", 0)
-            cache_creation = details.get("cache_creation", 0)
-            cache_read = details.get("cache_read", 0)
+            cache_read = details.get("cache_read") or 0
+            cache_creation = details.get("cache_creation") or (
+                (details.get("ephemeral_5m_input_tokens") or 0)
+                + (details.get("ephemeral_1h_input_tokens") or 0)
+            )
+            input_tokens = usage.get("input_tokens", 0) - cache_read - cache_creation
             handle.set_attr("input_tokens", input_tokens)
             handle.set_attr("output_tokens", output_tokens)
             handle.set_attr("cache_creation_input_tokens", cache_creation)
