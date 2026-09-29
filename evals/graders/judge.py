@@ -49,18 +49,27 @@ class JudgeVerdict(BaseModel):
 _CRITERION_SCHEMA = {
     "type": "object",
     "properties": {
-        "score": {"type": "integer", "minimum": 1, "maximum": 5},
+        "score": {"type": "integer", "enum": [1, 2, 3, 4, 5]},
         "rationale": {"type": "string"},
     },
     "required": ["score", "rationale"],
+    "additionalProperties": False,
 }
+# [HARNESS:EVAL] strict tool schema -- forced tool use isn't enough.
+# WHY: tool_choice guarantees the judge *calls* submit_grades, not that the
+# arguments match the schema. On calibration it once answered {"score": 1},
+# collapsing all five criteria into one field. `strict` makes the API
+# constrain generation to the schema; pydantic validation below stays as
+# defense in depth (and is what caught the collapse in the first place).
 JUDGE_TOOL: dict[str, Any] = {
     "name": "submit_grades",
     "description": "Submit a 1-5 score and short rationale for every rubric criterion.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {c: _CRITERION_SCHEMA for c in CRITERIA},
         "required": list(CRITERIA),
+        "additionalProperties": False,
     },
 }
 _TOOL_CHOICE = {"type": "tool", "name": "submit_grades", "disable_parallel_tool_use": True}

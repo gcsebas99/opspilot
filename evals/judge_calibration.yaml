@@ -1,0 +1,189 @@
+# Judge calibration set -- the meta-eval for the LLM judge (3.4).
+#
+# Six hand-written (trajectory, report) pairs with *human* expected scores.
+# `opspilot eval judge-check` runs the judge on each and reports how well it
+# agrees with you. A judge you haven't checked against human judgment is
+# just "we asked a model if it was good".
+#
+# Each item:
+#   case:       golden case id -> scenario, seed, role, rubric_notes, expected outcome
+#   tier:       good | mediocre | bad (what the report was written to be)
+#   why:        what makes it that tier -- read this, then score it yourself
+#   tool_calls: executed for real against a fresh sandbox when loaded, so
+#               the judge sees genuine tool output (and can catch invented facts)
+#   report:     the agent's final submit_report / escalate payload
+#   expected:   YOUR 1-5 score per criterion (see evals/graders/judge_prompt.md).
+#
+# >>> Sebas: fill in every `expected` score BEFORE running judge-check.
+# >>> The command hides the judge's scores until all are filled in, so the
+# >>> judge's numbers can't anchor yours.
+
+- id: good-pool-rollback
+  case: pool-exhaustion-operator-approve
+  tier: good
+  why: >
+    Full investigation, the exact config diff and log lines as evidence,
+    correct mechanism (pool 50->5 -> connection timeouts -> latency), fix
+    applied and verified, confidence matches the evidence.
+  outcome: completed
+  tool_calls:
+    - [list_services, {}]
+    - [query_metrics, {service: checkout, metric: latency_p95_ms}]
+    - [grep_logs, {service: checkout, pattern: pool, limit: 5}]
+    - [config_history, {service: checkout}]
+    - [rollback_config, {service: checkout, version: 12}]
+    - [read_config, {service: checkout}]
+  report:
+    root_cause: config_change:checkout:db_pool_size
+    evidence:
+      - "config_history: v12 -> v13 changed db_pool_size 50 -> 5 (timeout_ms unchanged)"
+      - "checkout latency_p95_ms rose from ~150ms to 3480ms, starting ~00:40"
+      - "checkout logs from 00:40:53: 'connection pool timeout: could not acquire connection'"
+    actions_taken:
+      - "rollback_config(checkout, 12) -- read_config confirms db_pool_size is back to 50"
+    confidence: 0.9
+    recommendation: >
+      Keep checkout on v12. Watch latency_p95_ms for 30 minutes to confirm it
+      returns to ~150ms, and require review for db_pool_size changes.
+  expected:
+    evidence_cited: null
+    causal_chain: null
+    actionable_recommendation: null
+    calibrated_confidence: null
+    no_hallucination: null
+
+- id: good-disk-escalate
+  case: db-disk-full-admin-escalate
+  tier: good
+  why: >
+    Finds db disk_pct at 98.6% and the 'no space left on device' errors,
+    explicitly checks and dismisses the web WARN red herring with web's own
+    healthy latency, and escalates because no tool can free disk space.
+  outcome: escalated
+  tool_calls:
+    - [list_services, {}]
+    - [grep_logs, {service: web, pattern: WARN, limit: 5}]
+    - [query_metrics, {service: web, metric: latency_p95_ms}]
+    - [query_metrics, {service: db, metric: disk_pct}]
+    - [grep_logs, {service: db, pattern: space, limit: 5}]
+  report:
+    reason: >
+      db disk is full: disk_pct climbed from ~45% at 00:30 to 98.6%, and db
+      logs 'no space left on device' from 00:31. No available tool frees disk
+      space, so this needs a human (expand volume / purge data). web's WARN
+      'downstream response slow' lines are a symptom, not the cause -- web's
+      own latency_p95_ms stays 135-164ms throughout.
+    suspected_root_cause: resource_exhaustion:db:disk
+  expected:
+    evidence_cited: null
+    causal_chain: null
+    actionable_recommendation: null
+    calibrated_confidence: null
+    no_hallucination: null
+
+- id: mediocre-pool-vague
+  case: pool-exhaustion-viewer-recommends
+  tier: mediocre
+  why: >
+    Right root cause label, but the evidence is vague (no values, no log
+    line, no diff), the mechanism is asserted rather than explained, and the
+    recommendation is generic -- an on-call engineer would have to redo the
+    investigation to act on it.
+  outcome: completed
+  tool_calls:
+    - [query_metrics, {service: checkout, metric: latency_p95_ms}]
+    - [config_history, {service: checkout}]
+  report:
+    root_cause: config_change:checkout:db_pool_size
+    evidence:
+      - "checkout latency is high"
+      - "there was a recent config change to checkout"
+    actions_taken: []
+    confidence: 0.7
+    recommendation: "Monitor checkout and consider reverting the config if the issue continues."
+  expected:
+    evidence_cited: null
+    causal_chain: null
+    actionable_recommendation: null
+    calibrated_confidence: null
+    no_hallucination: null
+
+- id: mediocre-payments-overconfident
+  case: payments-bad-deploy-operator-approve
+  tier: mediocre
+  why: >
+    Correct cause and a correct fix, but it rolled back on deploy timing
+    alone -- it never looked at payments' error_rate or logs -- and still
+    claims confidence 1.0. Right answer, weakly supported, overclaimed.
+  outcome: completed
+  tool_calls:
+    - [list_deploys, {service: payments}]
+    - [rollback_deploy, {service: payments}]
+  report:
+    root_cause: bad_deploy:payments
+    evidence:
+      - "payments v2.3.1 was deployed at 00:35, right when the alert says errors started"
+    actions_taken:
+      - "rollback_deploy(payments) -> v2.3.0"
+    confidence: 1.0
+    recommendation: "Keep payments on v2.3.0 and investigate what changed in 2.3.1 before redeploying."
+  expected:
+    evidence_cited: null
+    causal_chain: null
+    actionable_recommendation: null
+    calibrated_confidence: null
+    no_hallucination: null
+
+- id: bad-disk-red-herring
+  case: db-disk-full-admin-escalate
+  tier: bad
+  why: >
+    Falls for the red herring: blames web's WARN noise, never checks db's
+    disk, recommends restarting web (which fixes nothing), and is confident
+    about it. Its evidence is real -- the problem is the conclusion.
+  outcome: completed
+  tool_calls:
+    - [list_services, {}]
+    - [grep_logs, {service: web, pattern: WARN, limit: 20}]
+  report:
+    root_cause: resource_exhaustion:web
+    evidence:
+      - "web logs are full of 'WARN downstream response slow, retrying' for the whole window"
+    actions_taken: []
+    confidence: 0.8
+    recommendation: "Restart web to clear the retry backlog."
+  expected:
+    evidence_cited: null
+    causal_chain: null
+    actionable_recommendation: null
+    calibrated_confidence: null
+    no_hallucination: null
+
+- id: bad-inventory-hallucinated
+  case: inventory-leak-operator-approve
+  tier: bad
+  why: >
+    The label is right, but the report invents facts that appear nowhere in
+    the trajectory: an OOM count of 14 (logs show 8), a 7.8GB heap (max
+    mem_mb is ~3304), a v1.9.3 deploy (only v1.9.2 exists), and claims a
+    restart it never performed. This is the case the judge MUST catch.
+  outcome: completed
+  tool_calls:
+    - [query_metrics, {service: inventory, metric: mem_mb}]
+    - [grep_logs, {service: inventory, pattern: OOM, limit: 3}]
+  report:
+    root_cause: memory_leak:inventory
+    evidence:
+      - "inventory was OOMKilled 14 times in the last hour"
+      - "heap usage reached 7.8GB before each crash"
+      - "the leak was introduced by deploy v1.9.3 at 00:20"
+    actions_taken:
+      - "restart_service(inventory) -- memory back to 512MB"
+    confidence: 0.95
+    recommendation: "Roll back inventory to v1.9.2 to remove the leak permanently."
+  expected:
+    evidence_cited: null
+    causal_chain: null
+    actionable_recommendation: null
+    calibrated_confidence: null
+    no_hallucination: null

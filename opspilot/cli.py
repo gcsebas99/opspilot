@@ -10,6 +10,14 @@ from typing import Any, Literal
 import typer
 from rich.console import Console
 
+from evals.calibration import (
+    CALIBRATION_CASSETTE_ROOT,
+    MIN_PASS_AGREEMENT,
+    MIN_WITHIN_ONE,
+    load_calibration,
+    run_judge_check,
+)
+from evals.graders.judge import CRITERIA
 from evals.loader import load_cases
 from evals.runner import regrade_sweep, run_suite
 from opspilot.config import get_settings
@@ -801,6 +809,88 @@ async def _eval_grade_async(sweep_id: str, mode: ModelMode, judge: bool) -> None
         raise typer.Exit(code=1)
     errored = _print_trials(trials, mode, judge)
     if errored:
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("judge-check")
+def eval_judge_check(
+    mode: str | None = typer.Option(
+        None, "--mode", help="replay (default), record, or live -- for the judge's calls."
+    ),
+    reveal: bool = typer.Option(
+        False,
+        "--reveal",
+        help="Show the judge's scores even if some items lack human scores (un-blinds you).",
+    ),
+) -> None:
+    """Check the LLM judge against human-scored reports (evals/judge_calibration.yaml)."""
+    model_mode = _resolve_mode_or_exit(mode)
+    with _cassette_miss_exits(model_mode):
+        asyncio.run(_judge_check_async(model_mode, reveal))
+
+
+async def _judge_check_async(mode: ModelMode, reveal: bool) -> None:
+    settings = get_settings()
+    judge_settings = settings.model_copy(update={"opspilot_model": settings.opspilot_judge_model})
+    items = load_calibration()
+
+    report = await run_judge_check(
+        items,
+        settings=settings,
+        judge_client_for=lambda item: build_model_client(
+            judge_settings, mode, CALIBRATION_CASSETTE_ROOT / f"{item.id}.jsonl"
+        ),
+    )
+    console.print(
+        f"[bold]judge:[/bold] {report.judge_model}  "
+        f"[dim]prompt={report.judge_prompt_version} mode={mode}[/dim]\n"
+    )
+    for result in report.items:
+        if result.judge_error:
+            console.print(f"[red]{result.id}: judge error: {result.judge_error}[/red]")
+
+    unscored = [item.id for item in items if not item.is_scored()]
+    if unscored and not reveal:
+        # Blind by design: seeing the judge's numbers first would anchor the
+        # human scores that are supposed to check it.
+        console.print(
+            f"[yellow]{len(unscored)}/{len(items)} items have no human scores yet:[/yellow] "
+            + ", ".join(unscored)
+        )
+        console.print(
+            "Score them in evals/judge_calibration.yaml first (the judge's scores stay "
+            "hidden until you do), then re-run. --reveal un-blinds."
+        )
+        raise typer.Exit(code=1)
+
+    for result in report.items:
+        expected = result.expected_avg
+        exp_text = f"{expected:.1f}" if expected is not None else "  - "
+        diffs = " ".join(
+            f"{c[:4]}={result.judged.get(c, '?')}"
+            + (f"/{result.expected[c]}" if result.expected.get(c) is not None else "")
+            for c in CRITERIA
+        )
+        console.print(
+            f"{result.id:34} {result.tier:9} human={exp_text} judge={result.judged_avg:.1f}  "
+            f"[dim]{diffs}[/dim]"
+        )
+    console.print(
+        f"\n[bold]within-1:[/bold] {report.within_one:.0%}  "
+        f"[bold]MAE:[/bold] {report.mean_abs_error:.2f}  "
+        f"[bold]pass/fail agreement:[/bold] {report.pass_agreement:.0%}"
+    )
+    worst = sorted(report.per_criterion_mae.items(), key=lambda kv: -kv[1])
+    console.print(
+        "[dim]MAE by criterion: " + ", ".join(f"{c}={m:.2f}" for c, m in worst) + "[/dim]"
+    )
+    if report.trusted:
+        console.print("[bold green]judge TRUSTED[/bold green] on this calibration set")
+    else:
+        console.print(
+            f"[bold red]judge NOT TRUSTED[/bold red] (needs within-1 >= {MIN_WITHIN_ONE:.0%} "
+            f"and pass/fail agreement >= {MIN_PASS_AGREEMENT:.0%})"
+        )
         raise typer.Exit(code=1)
 
 

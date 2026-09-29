@@ -158,3 +158,16 @@ def test_judge_input_has_ground_truth_state_and_fenced_transcript() -> None:
     # Long tool output is truncated.
     assert "chars total]" in fenced
     assert '"root_cause": "config_change:checkout:db_pool_size"' in fenced
+
+
+def test_judge_tool_schema_is_strict_and_closed() -> None:
+    """A forced tool call can still return the wrong shape ({"score": 1} was
+    seen live); strict + closed objects make the API enforce the schema."""
+    assert JUDGE_TOOL["strict"] is True
+    schema = JUDGE_TOOL["input_schema"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(CRITERIA)
+    for criterion in CRITERIA:
+        sub = schema["properties"][criterion]
+        assert sub["additionalProperties"] is False
+        assert sub["properties"]["score"]["enum"] == [1, 2, 3, 4, 5]
