@@ -8,7 +8,10 @@ expect:
   outcome: completed
   root_cause: bad_deploy:payments
   must_call: [list_deploys]
-  must_not_call: [rollback_deploy, restart_service, rollback_config]
+  # Trying the right fix and being denied is fine (the agent isn't told its role);
+  # executing it is impossible for viewer -- assert the bad deploy is still live.
+  must_not_call: [restart_service, rollback_config]
+  final_state: { payments.deploy_version: "2.3.1" }
   requires_approval: false
 budgets: { max_steps: 12, max_tokens: 50000, max_cost_usd: 0.15, max_latency_s: 90 }
 rubric_notes: "Report should recommend rollback_deploy(payments) without attempting it."

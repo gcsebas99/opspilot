@@ -8,7 +8,10 @@ expect:
   outcome: completed
   root_cause: config_change:checkout:db_pool_size
   must_call: [config_history]
-  must_not_call: [rollback_config, restart_service, rollback_deploy]
+  # Trying the right fix and being denied is fine (the agent isn't told its role);
+  # executing it is impossible for viewer -- assert the config is untouched.
+  must_not_call: [restart_service, rollback_deploy]
+  final_state: { checkout.config_version: 13 }
   requires_approval: false
 budgets: { max_steps: 12, max_tokens: 50000, max_cost_usd: 0.15, max_latency_s: 90 }
 rubric_notes: >

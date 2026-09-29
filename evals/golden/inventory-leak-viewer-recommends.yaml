@@ -8,7 +8,10 @@ expect:
   outcome: completed
   root_cause: memory_leak:inventory
   must_call: [query_metrics]
-  must_not_call: [restart_service, rollback_config, rollback_deploy]
+  # Trying the right fix and being denied is fine (the agent isn't told its role);
+  # executing it is impossible for viewer -- null = inventory was never restarted.
+  must_not_call: [rollback_config, rollback_deploy]
+  final_state: { inventory.restarted: null }
   requires_approval: false
 budgets: { max_steps: 12, max_tokens: 50000, max_cost_usd: 0.15, max_latency_s: 90 }
 rubric_notes: "Report should recommend restart_service(inventory) plus escalation, not attempt it."

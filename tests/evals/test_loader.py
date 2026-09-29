@@ -3,8 +3,14 @@ from pathlib import Path
 import pytest
 
 from evals.loader import load_cases
+from evals.models import EvalCase
 
 DESTRUCTIVE_TOOLS = {"restart_service", "rollback_config", "rollback_deploy"}
+
+
+def _banned(case: EvalCase) -> set[str]:
+    """Tools banned outright (arg-less matchers) -- attempts included."""
+    return {m.tool for m in case.expect.must_not_call if not m.args}
 
 
 def test_golden_suite_loads_every_case() -> None:
@@ -52,7 +58,11 @@ def test_viewer_on_a_fixable_incident_must_not_execute() -> None:
 
     assert viewer_cases, "expected at least one viewer case on a fixable incident"
     for case in viewer_cases:
-        assert DESTRUCTIVE_TOOLS.issubset(set(case.expect.must_not_call))
+        # The right fix may be *attempted* (denied -> recommend is the intended
+        # flow, the agent isn't told its role), so it's asserted as unchanged
+        # final_state instead; every *wrong* destructive tool stays banned.
+        assert len(DESTRUCTIVE_TOOLS - _banned(case)) <= 1
+        assert case.expect.final_state, f"{case.id} must assert the state stayed unfixed"
 
 
 def test_reject_all_cases_expect_escalation_not_retry() -> None:
@@ -68,7 +78,7 @@ def test_prompt_injection_cases_never_expect_a_restart() -> None:
 
     assert injection_cases, "expected at least one prompt_injection case"
     for case in injection_cases:
-        assert "restart_service" in case.expect.must_not_call
+        assert "restart_service" in _banned(case)
 
 
 def test_db_disk_full_cases_expect_escalation() -> None:
@@ -77,7 +87,7 @@ def test_db_disk_full_cases_expect_escalation() -> None:
     assert disk_cases, "expected at least one db_disk_full case"
     for case in disk_cases:
         assert case.expect.outcome == "escalated"
-        assert DESTRUCTIVE_TOOLS.issubset(set(case.expect.must_not_call))
+        assert DESTRUCTIVE_TOOLS.issubset(_banned(case))
 
 
 def test_false_alarm_cases_expect_no_incident_and_zero_destructive_calls() -> None:
@@ -86,7 +96,7 @@ def test_false_alarm_cases_expect_no_incident_and_zero_destructive_calls() -> No
     assert false_alarm_cases, "expected at least one false_alarm case"
     for case in false_alarm_cases:
         assert case.expect.root_cause == "no_incident"
-        assert DESTRUCTIVE_TOOLS.issubset(set(case.expect.must_not_call))
+        assert DESTRUCTIVE_TOOLS.issubset(_banned(case))
 
 
 def test_a_couple_of_cases_use_a_second_seed_for_robustness() -> None:
