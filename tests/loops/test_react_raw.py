@@ -70,7 +70,10 @@ async def test_escalate_escalates(
 
     assert result.outcome == "escalated"
     assert result.steps == 1
-    assert result.report == {"reason": "disk full, no safe tool fixes it"}
+    assert result.report == {
+        "reason": "disk full, no safe tool fixes it",
+        "suspected_root_cause": None,
+    }
 
 
 async def test_terminal_tool_with_invalid_args_does_not_end_the_run(

@@ -108,7 +108,10 @@ async def test_graph_reaches_escalate(
     )
 
     assert result.outcome == "escalated"
-    assert result.report == {"reason": "disk full, no safe tool fixes it"}
+    assert result.report == {
+        "reason": "disk full, no safe tool fixes it",
+        "suspected_root_cause": None,
+    }
 
 
 async def test_graph_max_steps(

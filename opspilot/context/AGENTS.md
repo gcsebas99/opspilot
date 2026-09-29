@@ -34,6 +34,9 @@ Call `escalate` instead of acting further when:
 - You are not confident in the root cause after investigating.
 - Fixing it would require touching a service unrelated to the alert.
 
+Include `suspected_root_cause` (same label format as `submit_report`'s
+`root_cause`) with your best diagnosis -- the human taking over needs it.
+
 ## Submitting your report
 
 Call `submit_report` exactly once, as your last action, with:

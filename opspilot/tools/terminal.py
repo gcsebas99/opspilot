@@ -3,6 +3,10 @@ from pydantic import BaseModel, Field
 from opspilot.env.sandbox import Sandbox
 from opspilot.tools.base import Tool, ToolResult
 
+# category[:service[:detail]] -- shared by submit_report and escalate so
+# graders (evals/graders/outcome.py) can parse either one the same way.
+ROOT_CAUSE_PATTERN = r"^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*){0,2}$"
+
 
 class SubmitReportInput(BaseModel):
     # [HARNESS:GUARD] Output guardrail -- structure, not content, is what
@@ -14,7 +18,7 @@ class SubmitReportInput(BaseModel):
     # tool result -- the model reads it and retries, the same
     # self-correction path as any other tool's bad-args error.
     root_cause: str = Field(
-        pattern=r"^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*){0,2}$",
+        pattern=ROOT_CAUSE_PATTERN,
         description=(
             "Concise root cause label, e.g. 'config_change:checkout:db_pool_size' "
             "(1-3 lowercase, ':'-separated segments), or 'no_incident'."
@@ -56,11 +60,23 @@ class EscalateInput(BaseModel):
     reason: str = Field(
         description="Why this needs a human (e.g. no safe tool fixes it, or cause is ambiguous)."
     )
+    # Optional so an agent that genuinely has no hypothesis can still hand
+    # off -- but a human picking up the page wants the best guess, and evals
+    # can only score an escalation's diagnosis if it names one.
+    suspected_root_cause: str | None = Field(
+        default=None,
+        pattern=ROOT_CAUSE_PATTERN,
+        description=(
+            "Your best root cause label so far, same format as submit_report's "
+            "root_cause (e.g. 'resource_exhaustion:db:disk'). Omit only if you "
+            "genuinely have no hypothesis."
+        ),
+    )
 
 
 def _escalate(sandbox: Sandbox, args: BaseModel) -> ToolResult:
     assert isinstance(args, EscalateInput)
-    return ToolResult(ok=True, content=f"escalated: {args.reason}", data={"reason": args.reason})
+    return ToolResult(ok=True, content=f"escalated: {args.reason}", data=args.model_dump())
 
 
 ESCALATE = Tool(
