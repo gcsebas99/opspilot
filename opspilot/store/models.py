@@ -15,6 +15,11 @@ class RunDoc(BaseModel):
     model: str
     prompt_version: str
     strategy: Literal["raw", "graph"]
+    # Stored so `opspilot approve` resumes a paused run with the same
+    # backend it started with (a replayed demo must not resume live), and so
+    # a replayed run's cost_usd (recorded cost, $0 actual) can be told apart.
+    mode: Literal["live", "record", "replay"] = "live"
+    cassette: str | None = None
     outcome: str | None = None
     steps: int | None = None
     tokens: dict[str, int] = Field(default_factory=dict)

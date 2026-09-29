@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     opspilot_tool_output_max_chars: int = Field(
         default=4_000, alias="OPSPILOT_TOOL_OUTPUT_MAX_CHARS"
     )
+    # replay by default: spending money (live/record) is always an explicit
+    # opt-in -- see opspilot/models/factory.py:resolve_mode.
+    opspilot_model_mode: Literal["live", "record", "replay"] = Field(
+        default="replay", alias="OPSPILOT_MODEL_MODE"
+    )
     opspilot_store: Literal["memory", "mongo"] = Field(default="memory", alias="OPSPILOT_STORE")
     mongodb_uri: str = Field(default="", alias="MONGODB_URI")
 

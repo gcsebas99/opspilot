@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import anthropic
 from langchain_anthropic import ChatAnthropic
@@ -17,6 +17,8 @@ from opspilot.tools.base import ToolRegistry
 
 ModelMode = Literal["live", "record", "replay"]
 
+DEMO_CASSETTE_ROOT = Path("evals/cassettes/demo")
+
 LiveClientFactory = Callable[[Settings], ModelClient]
 LiveChatFactory = Callable[[Settings, ToolRegistry], LanguageModelLike]
 
@@ -31,6 +33,34 @@ def default_live_chat_model(settings: Settings, registry: ToolRegistry) -> Langu
         model=settings.opspilot_model, max_tokens=8192, api_key=settings.anthropic_api_key
     )
     return chat_model.bind_tools(registry.to_anthropic_schema())
+
+
+class LiveCallRefused(RuntimeError):
+    """A mode that spends money was requested without what it needs."""
+
+
+# [HARNESS:GUARD] Cost guard -- spending money is always an explicit opt-in.
+# WHY: a demo or a forgotten shell loop must never burn API credit by
+# accident. The default mode is replay ($0); live/record only happen when a
+# human asks for them (--mode or OPSPILOT_MODEL_MODE), and fail fast without
+# an API key instead of erroring deep inside the first model call.
+# INTERVIEW: "How do you keep a demo agent from running up a bill?" ->
+# safe-by-default replay, explicit opt-in for live, recorded cassettes.
+def resolve_mode(requested: str | None, settings: Settings) -> ModelMode:
+    mode = requested or settings.opspilot_model_mode
+    if mode not in ("live", "record", "replay"):
+        raise ValueError(f"mode must be 'live', 'record', or 'replay', got {mode!r}")
+    if mode != "replay" and not settings.anthropic_api_key:
+        raise LiveCallRefused(
+            f"mode {mode!r} calls the Anthropic API but ANTHROPIC_API_KEY is empty"
+        )
+    return cast(ModelMode, mode)
+
+
+def demo_cassette_path(scenario: str, seed: int, role: str) -> Path:
+    # No strategy in the name: raw and graph send identical requests
+    # (tests/loops/test_strategy_parity.py), so one cassette serves both.
+    return DEMO_CASSETTE_ROOT / f"{scenario}-s{seed}-{role}.jsonl"
 
 
 # [HARNESS:EVAL] One switch decides whether a run costs money.

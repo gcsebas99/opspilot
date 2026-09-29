@@ -1,13 +1,13 @@
 import asyncio
 import subprocess
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import anthropic
 import typer
-from langchain_anthropic import ChatAnthropic
 from rich.console import Console
 
 from evals.loader import load_cases
@@ -20,7 +20,15 @@ from opspilot.env.sandbox import Sandbox
 from opspilot.env.scenarios import get_scenario
 from opspilot.loops.graph import build_checkpointer, resume_react_graph, run_react_graph
 from opspilot.loops.react_raw import LoopEvent, RunResult, run_react_loop
-from opspilot.models.anthropic_model import AnthropicModel
+from opspilot.models.cassette import CassetteMiss
+from opspilot.models.factory import (
+    LiveCallRefused,
+    ModelMode,
+    build_chat_model,
+    build_model_client,
+    demo_cassette_path,
+    resolve_mode,
+)
 from opspilot.observability.audit import (
     record_loop_audit,
     record_prompt_version_change_if_needed,
@@ -102,6 +110,18 @@ def run(
     strategy: str = typer.Option(
         "graph", "--strategy", help="Loop implementation: raw (Day 1) or graph (LangGraph, 2.3)."
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="replay (default, $0, needs a recorded cassette), record (API on cassette "
+        "miss), or live (API every call). Default comes from OPSPILOT_MODEL_MODE.",
+    ),
+    cassette: Path | None = typer.Option(
+        None,
+        "--cassette",
+        help="Cassette file for record/replay (default: evals/cassettes/demo/"
+        "<scenario>-s<seed>-<role>.jsonl).",
+    ),
 ) -> None:
     """Run the ReAct agent against a scenario's alert."""
     if strategy not in ("raw", "graph"):
@@ -110,7 +130,46 @@ def run(
     if role not in ("viewer", "operator", "admin"):
         console.print(f"[red]--role must be 'viewer', 'operator', or 'admin', got {role!r}[/red]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_async(scenario, seed, role, max_steps, strategy))  # type: ignore[arg-type]
+    model_mode = _resolve_mode_or_exit(mode)
+    if cassette is None and model_mode != "live":
+        cassette = demo_cassette_path(scenario, seed, role)
+    with _cassette_miss_exits(model_mode):
+        asyncio.run(
+            _run_async(scenario, seed, role, max_steps, strategy, model_mode, cassette)  # type: ignore[arg-type]
+        )
+
+
+def _resolve_mode_or_exit(requested: str | None) -> ModelMode:
+    try:
+        return resolve_mode(requested, get_settings())
+    except (ValueError, LiveCallRefused) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+
+@contextmanager
+def _cassette_miss_exits(mode: ModelMode) -> Iterator[None]:
+    try:
+        yield
+    except CassetteMiss as exc:
+        console.print(f"\n[red]cassette miss ({mode}):[/red] {exc}")
+        console.print(
+            "[dim]This path wasn't recorded (e.g. a different approval decision, or the "
+            "prompt changed). Re-run with --mode record to add it (calls the API).[/dim]"
+        )
+        raise typer.Exit(code=1) from exc
+
+
+def _print_mode_banner(mode: ModelMode, cassette: Path | None) -> None:
+    if mode == "live":
+        console.print("[bold red]mode: live[/bold red] -- every model call hits the API ($)")
+    elif mode == "record":
+        console.print(
+            f"[bold yellow]mode: record[/bold yellow] -- API only on cassette miss ($), "
+            f"saving to {cassette}"
+        )
+    else:
+        console.print(f"[bold green]mode: replay[/bold green] -- $0, no network, from {cassette}")
 
 
 async def _run_async(
@@ -119,6 +178,8 @@ async def _run_async(
     role: PermRole,
     max_steps: int | None,
     strategy: Literal["raw", "graph"],
+    mode: ModelMode,
+    cassette: Path | None,
 ) -> None:
     settings = get_settings()
 
@@ -137,6 +198,7 @@ async def _run_async(
 
     console.print(f"[bold]alert:[/bold] {scn.alert_text}")
     console.print(f"[dim]strategy:[/dim] {strategy}")
+    _print_mode_banner(mode, cassette)
     console.print(f"[dim]sandbox:[/dim] {sandbox.root}\n")
 
     registry = build_default_registry(settings)
@@ -167,12 +229,13 @@ async def _run_async(
             model=settings.opspilot_model,
             prompt_version=current_prompt_version,
             strategy=strategy,
+            mode=mode,
+            cassette=str(cassette) if cassette is not None else None,
         )
     )
 
     if strategy == "raw":
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0)
-        raw_model = AnthropicModel(client=client, model=settings.opspilot_model)
+        raw_model = build_model_client(settings, mode, cassette)
         events: list[LoopEvent] = []
 
         def on_event(event: LoopEvent) -> None:
@@ -207,10 +270,7 @@ async def _run_async(
                 model=settings.opspilot_model,
             )
     else:
-        chat_model = ChatAnthropic(
-            model=settings.opspilot_model, max_tokens=8192, api_key=settings.anthropic_api_key
-        )
-        bound_model = chat_model.bind_tools(registry.to_anthropic_schema())
+        bound_model = build_chat_model(settings, registry, mode, cassette)
         checkpointer, mongo_client = build_checkpointer(settings)
         console.print(
             "[dim](graph strategy: live per-step output lands in `opspilot trace`)[/dim]\n"
@@ -410,7 +470,8 @@ def approve(
     approver: str = typer.Option("cli", "--approver", help="Name recorded as the approver."),
 ) -> None:
     """Resume a paused run by approving or rejecting its pending tool call."""
-    asyncio.run(_approve_async(approval_id, reject, reason, approver))
+    with _cassette_miss_exits("replay"):
+        asyncio.run(_approve_async(approval_id, reject, reason, approver))
 
 
 async def _approve_async(approval_id: str, reject: bool, reason: str, approver: str) -> None:
@@ -445,8 +506,19 @@ async def _approve_async(approval_id: str, reject: bool, reason: str, approver: 
     sandbox = Sandbox(root=Path("tmp/runs") / f"{run.scenario}-{run.seed}")
 
     tracer = Tracer(store, run_id=run.run_id)
-    chat_model = ChatAnthropic(model=run.model, max_tokens=8192, api_key=settings.anthropic_api_key)
-    bound_model = chat_model.bind_tools(registry.to_anthropic_schema())
+    # Resume with the backend the run started with -- a replayed demo must
+    # not silently turn into a paid live call at the approval step.
+    if run.mode != "replay" and not settings.anthropic_api_key:
+        console.print(
+            f"[red]run {run.run_id} is mode={run.mode} but ANTHROPIC_API_KEY is empty[/red]"
+        )
+        raise typer.Exit(code=1)
+    bound_model = build_chat_model(
+        settings.model_copy(update={"opspilot_model": run.model}),
+        registry,
+        run.mode,
+        Path(run.cassette) if run.cassette is not None else None,
+    )
     checkpointer, mongo_client = build_checkpointer(settings)
 
     decision: dict[str, Any] = (
@@ -548,11 +620,11 @@ def eval_command(
     suite: str = typer.Option("golden", "--suite", help="golden (all cases) or a tag filter."),
     k: int = typer.Option(1, "--k", help="Trials per case."),
     strategy: str = typer.Option("graph", "--strategy", help="Loop implementation: raw or graph."),
-    mode: str = typer.Option(
-        "live",
+    mode: str | None = typer.Option(
+        None,
         "--mode",
-        help="live (real API), record (API on cassette miss, saves responses), "
-        "replay (cassettes only, no network, $0).",
+        help="replay (cassettes only, no network, $0), record (API on cassette miss, "
+        "saves responses), or live (real API). Default comes from OPSPILOT_MODEL_MODE.",
     ),
     concurrency: int = typer.Option(4, "--concurrency", help="Max trials running at once."),
 ) -> None:
@@ -560,10 +632,8 @@ def eval_command(
     if strategy not in ("raw", "graph"):
         console.print(f"[red]--strategy must be 'raw' or 'graph', got {strategy!r}[/red]")
         raise typer.Exit(code=1)
-    if mode not in ("live", "record", "replay"):
-        console.print(f"[red]--mode must be 'live', 'record', or 'replay', got {mode!r}[/red]")
-        raise typer.Exit(code=1)
-    asyncio.run(_eval_async(suite, k, strategy, mode, concurrency))  # type: ignore[arg-type]
+    model_mode = _resolve_mode_or_exit(mode)
+    asyncio.run(_eval_async(suite, k, strategy, model_mode, concurrency))  # type: ignore[arg-type]
 
 
 async def _eval_async(
