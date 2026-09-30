@@ -17,6 +17,7 @@ from evals.calibration import (
     load_calibration,
     run_judge_check,
 )
+from evals.compare import load_comparison
 from evals.graders.judge import CRITERIA
 from evals.loader import load_cases
 from evals.models import EvalCase
@@ -805,6 +806,60 @@ async def _eval_grade_async(sweep_id: str, mode: ModelMode, judge: bool) -> None
     golden = {c.id: c for c in load_cases("golden")}
     _write_and_print_report(trials, golden, suite=trials[0].suite, judge=judge)
     if errored:
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("compare")
+def eval_compare(
+    a: str = typer.Argument(..., help="Baseline: report .json, sweep id prefix, or `previous`."),
+    b: str = typer.Argument(..., help="Candidate: report .json, sweep id prefix, or `latest`."),
+) -> None:
+    """Diff two eval reports: regressions, fixes, and metric deltas. Exits 1 on any regression."""
+    try:
+        comparison = load_comparison(a, b)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    for label, meta in (("A", comparison.a), ("B", comparison.b)):
+        console.print(
+            f"[bold]{label}:[/bold] {meta.suite} {meta.sweep_id[:8]}  model={meta.model} "
+            f"strategy={meta.strategy} mode={meta.mode} k={meta.k} git={meta.git_sha}"
+        )
+    for warning in comparison.warnings:
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+    for note in comparison.notes:
+        console.print(f"[dim]note: {note}[/dim]")
+
+    console.print()
+    for delta in comparison.deltas:
+        before, after = delta.fmt(delta.before), delta.fmt(delta.after)
+        change = "" if delta.change is None else f"  ({delta.fmt(delta.change, signed=True)})"
+        console.print(f"  {delta.name:18} {before:>10} -> {after:<10}{change}")
+
+    sections = (
+        ("regression", "red", "REGRESSIONS"),
+        ("fix", "green", "fixes"),
+        ("changed", "yellow", "changed"),
+        ("added", "cyan", "added"),
+        ("removed", "cyan", "removed"),
+    )
+    for kind, color, title in sections:
+        diffs = comparison.of_kind(kind)  # type: ignore[arg-type]
+        if not diffs:
+            continue
+        console.print(f"\n[bold {color}]{title} ({len(diffs)})[/bold {color}]")
+        for diff in diffs:
+            rates = " -> ".join(
+                "--" if r is None else f"{r:.0%}" for r in (diff.before_rate, diff.after_rate)
+            )
+            console.print(
+                f"  {diff.case_id}: {diff.before or '--'} -> {diff.after or '--'} ({rates})"
+            )
+
+    unchanged = len(comparison.of_kind("unchanged"))
+    console.print(f"\n[dim]{unchanged} case(s) unchanged[/dim]")
+    if comparison.of_kind("regression"):
         raise typer.Exit(code=1)
 
 
