@@ -16,3 +16,7 @@ __pycache__/
 # Scratch / sandbox output
 tmp/
 .DS_Store
+
+# Generated eval reports (one per sweep). A chosen CI baseline is committed
+# deliberately elsewhere (3.7), never by accident.
+evals/reports/

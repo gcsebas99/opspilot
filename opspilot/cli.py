@@ -19,6 +19,8 @@ from evals.calibration import (
 )
 from evals.graders.judge import CRITERIA
 from evals.loader import load_cases
+from evals.models import EvalCase
+from evals.report import build_report, failed_checks, write_report
 from evals.runner import regrade_sweep, run_suite
 from opspilot.config import get_settings
 from opspilot.context.assembler import CONTEXT_DIR, prompt_version
@@ -669,23 +671,6 @@ def _grade_summary(trial: EvalTrialDoc) -> str:
     return " ".join(parts)
 
 
-def _failed_checks(trial: EvalTrialDoc) -> list[str]:
-    failed: list[str] = []
-    for name, grade in (trial.grades or {}).items():
-        if grade["passed"]:
-            continue
-        checks = [c for c in grade["details"].get("checks", []) if not c["passed"]]
-        if checks:
-            failed += [
-                f"{name}: {c['name']}" + (f" ({c['detail']})" if c["detail"] else "")
-                for c in checks
-            ]
-        else:
-            detail = grade["details"].get("match") or grade["details"].get("error") or ""
-            failed.append(f"{name}: {detail}".rstrip(": "))
-    return failed
-
-
 def _print_trials(trials: list[EvalTrialDoc], mode: str, judge: bool) -> int:
     """Print one line per trial (+ why it failed); return how many errored."""
     errored = 0
@@ -706,7 +691,7 @@ def _print_trials(trials: list[EvalTrialDoc], mode: str, judge: bool) -> int:
             f"{verdict} {label}  {_grade_summary(trial)}  "
             f"cost=${trial.cost_usd or 0:.4f} latency={trial.latency_s or 0:.1f}s"
         )
-        for line in _failed_checks(trial):
+        for line in failed_checks(trial.grades):
             console.print(f"     [dim]- {line}[/dim]")
         judge_grade = (trial.grades or {}).get("judge")
         if judge_grade is not None:
@@ -723,6 +708,14 @@ def _print_trials(trials: list[EvalTrialDoc], mode: str, judge: bool) -> int:
             "[dim]replay: costs shown are what the recorded calls cost; spend was $0.[/dim]"
         )
     return errored
+
+
+def _write_and_print_report(
+    trials: list[EvalTrialDoc], cases: dict[str, EvalCase], *, suite: str, judge: bool
+) -> None:
+    report = build_report(trials, cases, suite=suite, judged=judge)
+    json_path, md_path = write_report(report)
+    console.print(f"[bold]report:[/bold] {md_path}  [dim](+ {json_path.name})[/dim]")
 
 
 async def _eval_async(
@@ -771,6 +764,7 @@ async def _eval_async(
 
     errored = _print_trials(trials, mode, judge)
     console.print(f"[bold]sweep_id:[/bold] {trials[0].sweep_id}")
+    _write_and_print_report(trials, {c.id: c for c in cases}, suite=suite, judge=judge)
     # Non-zero exit on any runner or grading error -- in replay that includes
     # every agent *or judge* cassette miss, which is what lets CI (3.7) fail
     # on prompt/rubric drift. Plain FAILs don't exit non-zero: the pass-rate
@@ -808,6 +802,8 @@ async def _eval_grade_async(sweep_id: str, mode: ModelMode, judge: bool) -> None
         console.print(f"[red]no trials found for sweep {sweep_id!r}[/red]")
         raise typer.Exit(code=1)
     errored = _print_trials(trials, mode, judge)
+    golden = {c.id: c for c in load_cases("golden")}
+    _write_and_print_report(trials, golden, suite=trials[0].suite, judge=judge)
     if errored:
         raise typer.Exit(code=1)
 
