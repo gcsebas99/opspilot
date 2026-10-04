@@ -16,6 +16,7 @@ class CaseDiff(BaseModel):
     after: CaseVerdict | None
     before_rate: float | None
     after_rate: float | None
+    tags: list[str] = []
 
 
 Unit = Literal["rate", "usd", "count", "score", "seconds"]
@@ -133,6 +134,8 @@ def compare(a: EvalReport, b: EvalReport) -> Comparison:
             after=verdicts_b.get(case_id),
             before_rate=rates_a.get(case_id),
             after_rate=rates_b.get(case_id),
+            # The candidate's tags win (a case may have been re-tagged).
+            tags=b.case_tags.get(case_id) or a.case_tags.get(case_id) or [],
         )
         for case_id in sorted(set(verdicts_a) | set(verdicts_b))
     ]
@@ -182,6 +185,12 @@ def compare(a: EvalReport, b: EvalReport) -> Comparison:
         ),
     ]
     warnings, notes = _comparability(a.meta, b.meta)
+    for label, report in (("A", a), ("B", b)):
+        if not report.case_tags:
+            warnings.append(
+                f"report {label} has no case tags (written before tags were stored) -- "
+                "tag filters only see the other report's tags"
+            )
     return Comparison(
         a=a.meta, b=b.meta, cases=cases, deltas=deltas, warnings=warnings, notes=notes
     )

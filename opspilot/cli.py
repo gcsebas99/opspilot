@@ -18,10 +18,11 @@ from evals.calibration import (
     run_judge_check,
 )
 from evals.compare import load_comparison
+from evals.gates import gating_regressions, pass_rate_gate
 from evals.graders.judge import CRITERIA
 from evals.loader import load_cases
 from evals.models import EvalCase
-from evals.report import build_report, failed_checks, write_report
+from evals.report import EvalReport, build_report, failed_checks, write_report
 from evals.runner import regrade_sweep, run_suite
 from opspilot.config import get_settings
 from opspilot.context.assembler import CONTEXT_DIR, prompt_version
@@ -646,6 +647,9 @@ def eval_command(
     judge: bool = typer.Option(
         True, "--judge/--no-judge", help="Run the LLM judge (same mode as the agent)."
     ),
+    min_pass_rate: float | None = typer.Option(
+        None, "--min-pass-rate", help="CI gate: exit 1 if pass@1 is below this (0-1)."
+    ),
 ) -> None:
     """Run a suite of golden eval cases, grade every trial, and persist it."""
     if ctx.invoked_subcommand is not None:
@@ -654,7 +658,9 @@ def eval_command(
         console.print(f"[red]--strategy must be 'raw' or 'graph', got {strategy!r}[/red]")
         raise typer.Exit(code=1)
     model_mode = _resolve_mode_or_exit(mode)
-    asyncio.run(_eval_async(suite, k, strategy, model_mode, concurrency, judge))  # type: ignore[arg-type]
+    asyncio.run(
+        _eval_async(suite, k, strategy, model_mode, concurrency, judge, min_pass_rate)  # type: ignore[arg-type]
+    )
 
 
 def _grade_summary(trial: EvalTrialDoc) -> str:
@@ -713,10 +719,11 @@ def _print_trials(trials: list[EvalTrialDoc], mode: str, judge: bool) -> int:
 
 def _write_and_print_report(
     trials: list[EvalTrialDoc], cases: dict[str, EvalCase], *, suite: str, judge: bool
-) -> None:
+) -> EvalReport:
     report = build_report(trials, cases, suite=suite, judged=judge)
     json_path, md_path = write_report(report)
     console.print(f"[bold]report:[/bold] {md_path}  [dim](+ {json_path.name})[/dim]")
+    return report
 
 
 async def _eval_async(
@@ -726,6 +733,7 @@ async def _eval_async(
     mode: Literal["live", "record", "replay"],
     concurrency: int,
     judge: bool,
+    min_pass_rate: float | None = None,
 ) -> None:
     settings = get_settings()
     store = build_store(settings)
@@ -765,13 +773,19 @@ async def _eval_async(
 
     errored = _print_trials(trials, mode, judge)
     console.print(f"[bold]sweep_id:[/bold] {trials[0].sweep_id}")
-    _write_and_print_report(trials, {c.id: c for c in cases}, suite=suite, judge=judge)
+    report = _write_and_print_report(trials, {c.id: c for c in cases}, suite=suite, judge=judge)
     # Non-zero exit on any runner or grading error -- in replay that includes
-    # every agent *or judge* cassette miss, which is what lets CI (3.7) fail
-    # on prompt/rubric drift. Plain FAILs don't exit non-zero: the pass-rate
-    # gate is CI's decision (3.7), not the runner's.
+    # every agent *or judge* cassette miss, which is what lets CI fail on
+    # prompt/rubric drift. Plain FAILs only fail the run through the explicit
+    # --min-pass-rate gate: the threshold is the caller's (CI's) decision.
     if errored:
         raise typer.Exit(code=1)
+    if min_pass_rate is not None:
+        failure = pass_rate_gate(report.metrics, min_pass_rate)
+        if failure is not None:
+            console.print(f"[bold red]gate failed:[/bold red] {failure}")
+            raise typer.Exit(code=1)
+        console.print(f"[green]gate passed:[/green] pass@1 >= {min_pass_rate:.0%}")
 
 
 @eval_app.command("grade")
@@ -813,8 +827,13 @@ async def _eval_grade_async(sweep_id: str, mode: ModelMode, judge: bool) -> None
 def eval_compare(
     a: str = typer.Argument(..., help="Baseline: report .json, sweep id prefix, or `previous`."),
     b: str = typer.Argument(..., help="Candidate: report .json, sweep id prefix, or `latest`."),
+    fail_on_tag: list[str] = typer.Option(
+        [],
+        "--fail-on-tag",
+        help="Only regressions on cases with this tag fail (exit 1). Repeatable. Default: any.",
+    ),
 ) -> None:
-    """Diff two eval reports: regressions, fixes, and metric deltas. Exits 1 on any regression."""
+    """Diff two eval reports: regressions, fixes, metric deltas. Exits 1 on gating regressions."""
     try:
         comparison = load_comparison(a, b)
     except (FileNotFoundError, ValueError) as exc:
@@ -859,8 +878,15 @@ def eval_compare(
 
     unchanged = len(comparison.of_kind("unchanged"))
     console.print(f"\n[dim]{unchanged} case(s) unchanged[/dim]")
-    if comparison.of_kind("regression"):
+    gating = gating_regressions(comparison, fail_on_tag)
+    if gating:
+        scope = f" on tag(s) {', '.join(fail_on_tag)}" if fail_on_tag else ""
+        console.print(f"[bold red]gate failed:[/bold red] {len(gating)} regression(s){scope}")
         raise typer.Exit(code=1)
+    if comparison.of_kind("regression"):
+        console.print(
+            f"[yellow]regressions outside {', '.join(fail_on_tag)} don't fail this gate[/yellow]"
+        )
 
 
 @eval_app.command("judge-check")

@@ -56,6 +56,10 @@ class EvalReport(BaseModel):
     meta: ReportMeta
     metrics: SuiteMetrics
     trials: list[TrialSummary]
+    # Each case's tags at run time, so `compare --fail-on-tag adversarial`
+    # works from the report alone. Defaults to {} so reports written before
+    # this field existed still load (compare warns about them).
+    case_tags: dict[str, list[str]] = {}
 
 
 def failed_checks(grades: dict[str, Any] | None) -> list[str]:
@@ -127,6 +131,11 @@ def build_report(
         ),
         metrics=metrics,
         trials=[_summarize(t) for t in sorted(trials, key=lambda t: (t.case_id, t.trial))],
+        case_tags={
+            case_id: list(cases[case_id].tags)
+            for case_id in sorted({t.case_id for t in trials})
+            if case_id in cases
+        },
     )
 
 
