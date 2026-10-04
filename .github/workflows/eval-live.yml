@@ -1,0 +1,110 @@
+name: Eval (live)
+
+# [HARNESS:EVAL] Live evals -- manual only, bounded, and never on push.
+# WHY: replay (ci.yml) tests the harness for free; only a live run tests the
+# *model + prompt*. Live runs cost real money, so they are a deliberate act:
+# workflow_dispatch only, choice inputs that cap the size of a run, one run
+# at a time, and a hard timeout.
+# Approx. cost per trial: ~$0.04 agent (haiku-4-5) + ~$0.02 judge (sonnet-5).
+#   smoke (4 cases):       k=1 ~ $0.24   k=3 ~ $0.72
+#   adversarial (3 cases): k=1 ~ $0.18   k=3 ~ $0.54
+#   claude-sonnet-5 as the agent roughly doubles the agent part.
+# Requires the ANTHROPIC_API_KEY repository secret
+# (Settings -> Secrets and variables -> Actions).
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite (golden is deliberately not offered -- too expensive for a click)"
+        type: choice
+        options: [smoke, adversarial]
+        default: smoke
+      k:
+        description: "Trials per case"
+        type: choice
+        options: ["1", "2", "3"]
+        default: "1"
+      strategy:
+        description: "Loop implementation"
+        type: choice
+        options: [graph, raw]
+        default: graph
+      model:
+        description: "Agent model"
+        type: choice
+        options: [claude-haiku-4-5, claude-sonnet-5]
+        default: claude-haiku-4-5
+      judge:
+        description: "Run the LLM judge (adds ~$0.02 per trial)"
+        type: boolean
+        default: true
+
+# Never two paid runs at once -- a double-click shouldn't double the bill.
+concurrency:
+  group: eval-live
+  cancel-in-progress: false
+
+jobs:
+  eval-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OPSPILOT_MODEL_MODE: live
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPSPILOT_JUDGE_MODEL: claude-sonnet-5
+      OPSPILOT_STORE: memory
+      COLUMNS: "120"
+      # Inputs reach the shell only through env vars, never as ${{ }} inside
+      # `run:` -- the standard defense against script injection in Actions.
+      SUITE: ${{ inputs.suite }}
+      K: ${{ inputs.k }}
+      STRATEGY: ${{ inputs.strategy }}
+      OPSPILOT_MODEL: ${{ inputs.model }}
+      JUDGE: ${{ inputs.judge }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the API key secret is set
+        shell: bash
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set (Settings -> Secrets -> Actions)"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run live eval
+        shell: bash
+        run: |
+          judge_flag="--judge"
+          if [ "$JUDGE" != "true" ]; then judge_flag="--no-judge"; fi
+          # No pass-rate gate: a live run measures the model, it doesn't
+          # guard a merge. Concurrency 2 stays well under API rate limits.
+          uv run opspilot eval --suite "$SUITE" --k "$K" --strategy "$STRATEGY" \
+            --mode live --concurrency 2 "$judge_flag"
+
+      - name: Publish report to the job summary
+        if: always()
+        shell: bash
+        run: |
+          report="$(ls -t evals/reports/*.md 2>/dev/null | head -1)"
+          if [ -n "$report" ]; then cat "$report" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-live-${{ inputs.suite }}-k${{ inputs.k }}-${{ inputs.model }}
+          path: evals/reports/
+          if-no-files-found: warn
