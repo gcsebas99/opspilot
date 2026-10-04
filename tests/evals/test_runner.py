@@ -355,11 +355,15 @@ async def _run_mode(
 
 
 def _same_trial(a: EvalTrialDoc, b: EvalTrialDoc) -> None:
-    assert (a.outcome, a.tool_calls, a.report, a.sandbox_snapshot, a.cost_usd) == (
+    # sandbox_facts, not sandbox_snapshot: the snapshot hashes state.json,
+    # which holds restart_service's wall-clock restarted_at -- a record run
+    # and a replay run in different seconds hash differently (this flaked
+    # in CI). facts() reduces that to a stable `restarted: true`.
+    assert (a.outcome, a.tool_calls, a.report, a.sandbox_facts, a.cost_usd) == (
         b.outcome,
         b.tool_calls,
         b.report,
-        b.sandbox_snapshot,
+        b.sandbox_facts,
         b.cost_usd,
     )
 
@@ -504,3 +508,25 @@ async def test_run_suite_respects_concurrency_limit(tmp_path: Path, settings: Se
     )
 
     assert 1 <= counter.max_seen <= 2
+
+
+async def test_record_replay_equality_survives_a_clock_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for a CI flake: the record and replay runs crossed a
+    second boundary, so restart_service's restarted_at differed and the
+    sandbox *hashes* didn't match. Force that tick deterministically."""
+    case = _case("rr-tick", scenario="checkout_pool_exhaustion", role="operator")
+    live = ScriptedModel(
+        [
+            _tool_use("restart_service", {"service": "checkout"}, "t1"),
+            _tool_use("submit_report", _REPORT_INPUT, "t2"),
+        ]
+    )
+    monkeypatch.setattr("opspilot.tools.destructive._now_iso", lambda: "2026-01-01T00:00:00Z")
+    recorded = await _run_mode(case, strategy="graph", mode="record", tmp_path=tmp_path, live=live)
+    monkeypatch.setattr("opspilot.tools.destructive._now_iso", lambda: "2026-01-01T00:00:01Z")
+    replayed = await _run_mode(case, strategy="graph", mode="replay", tmp_path=tmp_path)
+
+    assert recorded.sandbox_snapshot != replayed.sandbox_snapshot  # the trap is real
+    _same_trial(recorded, replayed)

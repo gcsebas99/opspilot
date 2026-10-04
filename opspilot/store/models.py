@@ -111,6 +111,9 @@ class EvalTrialDoc(BaseModel):
     outcome: str | None = None
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     report: dict[str, Any] | None = None
+    # File hashes -- detects *that* state changed, but includes wall-clock
+    # values (restart_service's restarted_at), so it is NOT stable across
+    # runs. Compare sandbox_facts for "same end state".
     sandbox_snapshot: dict[str, str] = Field(default_factory=dict)
     # Everything below (through latency_s) exists so graders (3.4) are pure
     # functions of (case, trial) -- no sandbox or store access needed, so a

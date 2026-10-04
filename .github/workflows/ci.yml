@@ -29,7 +29,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Type check (mypy)
-        run: uv run mypy opspilot
+        run: uv run mypy opspilot evals
 
       - name: Test (pytest)
         run: uv run pytest -q
