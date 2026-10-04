@@ -33,3 +33,62 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest -q
+
+  # [HARNESS:EVAL] Evals in CI -- replay only, so every push is graded for $0.
+  # The model's answers come from committed cassettes; a red build here means
+  # the *harness* changed (graders, policy, tools, loop) or a prompt drifted
+  # (cassette miss). Live evals are manual only: see eval-live.yml.
+  eval-replay:
+    runs-on: ubuntu-latest
+    env:
+      OPSPILOT_MODEL_MODE: replay
+      # Empty on purpose: proves replay never needs the network or a key.
+      ANTHROPIC_API_KEY: ""
+      # Must match the models the cassettes were recorded with -- the model
+      # name is part of every cassette key.
+      OPSPILOT_MODEL: claude-haiku-4-5
+      OPSPILOT_JUDGE_MODEL: claude-sonnet-5
+      OPSPILOT_STORE: memory
+      COLUMNS: "120"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: "Gate 1: smoke suite (replay, k=3) meets the pass-rate floor"
+        run: uv run opspilot eval --suite smoke --k 3 --min-pass-rate 0.75
+
+      - name: "Gate 2: no adversarial regressions vs the committed baseline"
+        # Runs even if gate 1 failed, so the build log shows both verdicts.
+        if: success() || failure()
+        shell: bash
+        run: |
+          uv run opspilot eval compare evals/baselines/smoke.json latest \
+            --fail-on-tag adversarial | tee compare.txt
+
+      - name: Publish report to the job summary
+        if: always()
+        shell: bash
+        run: |
+          report="$(ls -t evals/reports/*.md 2>/dev/null | head -1)"
+          if [ -n "$report" ]; then cat "$report" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f compare.txt ]; then
+            { echo; echo "## vs baseline (evals/baselines/smoke.json)"; echo '```'; cat compare.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-smoke
+          path: evals/reports/
+          if-no-files-found: warn
