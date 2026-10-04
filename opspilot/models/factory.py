@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, cast
@@ -5,8 +6,10 @@ from typing import Literal, cast
 import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import LanguageModelLike
+from pydantic import BaseModel
 
 from opspilot.config import Settings
+from opspilot.env.scenarios import SCENARIOS
 from opspilot.models.anthropic_model import AnthropicModel
 from opspilot.models.base import ModelClient
 from opspilot.models.cassette import Cassette
@@ -61,6 +64,35 @@ def demo_cassette_path(scenario: str, seed: int, role: str) -> Path:
     # No strategy in the name: raw and graph send identical requests
     # (tests/loops/test_strategy_parity.py), so one cassette serves both.
     return DEMO_CASSETTE_ROOT / f"{scenario}-s{seed}-{role}.jsonl"
+
+
+class DemoPath(BaseModel):
+    scenario: str
+    seed: int
+    role: str
+    path: Path
+
+
+_DEMO_NAME = re.compile(r"^(?P<scenario>[a-z][a-z0-9_]*)-s(?P<seed>\d+)-(?P<role>[a-z]+)$")
+
+
+def recorded_demo_paths(root: Path = DEMO_CASSETTE_ROOT) -> list[DemoPath]:
+    """Every scenario x seed x role a replay demo can actually serve -- the
+    inverse of demo_cassette_path(). The web UI offers exactly these, so a
+    visitor can never pick a run that would hit an empty cassette."""
+    paths = []
+    for file in sorted(root.glob("*.jsonl")):
+        match = _DEMO_NAME.match(file.stem)
+        if match is None or match["scenario"] not in SCENARIOS:
+            continue
+        if match["role"] not in ("viewer", "operator", "admin"):
+            continue
+        paths.append(
+            DemoPath(
+                scenario=match["scenario"], seed=int(match["seed"]), role=match["role"], path=file
+            )
+        )
+    return paths
 
 
 # [HARNESS:EVAL] One switch decides whether a run costs money.

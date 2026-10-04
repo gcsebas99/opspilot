@@ -3,6 +3,27 @@
 **Goal:** a public Render URL where anyone can trigger an incident, watch the trace stream in, and approve
 or reject destructive actions — plus context compaction and long-term incident memory, both evaluated.
 
+## Demo mode: replay by default (decided 2026-10-04)
+
+The public demo makes **zero Anthropic API calls**. It reuses Day 3's record/replay:
+
+- **Model responses are replayed** from recorded demo cassettes (`evals/cassettes/demo/`, see
+  `opspilot run --mode record`). **Everything else runs for real**: tools against a real sandbox,
+  permission policy, guardrails, HITL pause/resume, trace, audit log.
+- **Banner on every page:** "Model responses are recordings of real Claude runs; tools, permissions,
+  approvals and traces execute live. Clone the repo and set `ANTHROPIC_API_KEY` to run against the live model."
+- **Only recorded paths are offered.** The UI lists scenario × role × seed combinations from the demo
+  cassettes that exist. Approve *and* reject branches are both recorded (one cassette, shared prefix).
+  "Approve with edits" produces unrecorded arguments → disabled in replay, or a cassette miss shows a
+  friendly "this path wasn't recorded — clone to run it live" instead of an error.
+- **Live mode is owner-only and off by default** (`OPSPILOT_DEMO_LIVE=false`). The cost guards below
+  (rate limit, daily cap, token budget) protect that optional live path. The public page's strongest
+  protection is simply never holding a usable key in replay deployments.
+- **Not offered:** "bring your own key" on the site — handling visitors' secrets server-side is a
+  security/privacy burden a demo shouldn't carry. Clone-and-run gives the same thing safely.
+- Demo cassettes are recorded **late** (after 4.5 compaction, which changes prompts), haiku agent,
+  no judge: ~$0.04 per recorded path. Ask before recording.
+
 **Pillars:** MEMORY · CONTEXT · outer loops · deployment
 
 Order matters: do 4.1–4.4 first (deployable demo). 4.5–4.6 are cut first if short on time.
@@ -24,10 +45,13 @@ Order matters: do 4.1–4.4 first (deployable demo). 4.5–4.6 are cut first if 
   **Mongo checkpointer** (this is why Day 2 made resume work across processes).
 - `GET /metrics` dashboard (Day 2 aggregations), `GET /evals` latest eval report, `GET /healthz`.
 - "Act as" role selector (demo auth — clearly labeled). Approver identity recorded in audit log.
-- Server-side guards for the public demo: per-IP rate limit, **global daily run cap**, hard token budget per run
-  `[HARNESS:GUARD]` — your API key is behind this.
+- Model mode per the demo decision above: replay by default, choices limited to recorded paths, friendly
+  cassette-miss page, banner.
+- Server-side guards for the **optional live mode**: per-IP rate limit, **global daily run cap**, hard token
+  budget per run `[HARNESS:GUARD]` — your API key is behind this when `OPSPILOT_DEMO_LIVE=true`.
 
-**Accept:** local end-to-end: start run as operator → pause → approve in browser → run completes; trace visible.
+**Accept:** local end-to-end **in replay ($0)**: start run as operator → pause → approve in browser → run
+completes; trace visible.
 
 ## 4.2 Outer loops `[HARNESS:LOOP]`
 
@@ -35,14 +59,17 @@ Order matters: do 4.1–4.4 first (deployable demo). 4.5–4.6 are cut first if 
   **idempotency key** (same alert twice ⇒ one run), maps alert → scenario, runs as `system` role.
 - **Cron/heartbeat:** `.github/workflows/canary.yml` scheduled daily: sends a signed `false_alarm`
   alert to the deployed webhook and asserts the run ends `completed` with `no_incident` — a production
-  canary that doubles as an online eval.
+  canary that doubles as an online eval. Runs against the **replay** deployment, so it verifies the whole
+  path (signature, idempotency, run, outcome) for $0.
 - Document in README: goal-driven (the inner loop), event (webhook), time-based (cron), heartbeat (canary)
   — and where Ralph-style brute-force retry loops would fit (outer "retry until evals pass" loop — explain, don't build).
 
 ## 4.3 Deploy to Render
 
 - `Dockerfile` (slim, uv, non-root user), `render.yaml` blueprint (web service, free plan, env vars:
-  `ANTHROPIC_API_KEY`, `MONGODB_URI`, `OPSPILOT_MODEL`, `WEBHOOK_SECRET`, `DAILY_RUN_CAP`).
+  `OPSPILOT_MODEL_MODE=replay`, `OPSPILOT_DEMO_LIVE=false`, `MONGODB_URI`, `OPSPILOT_MODEL`, `WEBHOOK_SECRET`,
+  `DAILY_RUN_CAP`; `ANTHROPIC_API_KEY` left unset unless live mode is deliberately enabled).
+- Record the demo cassettes (see "Demo mode") before deploying — the only paid step of Day 4's demo.
 - Atlas: free cluster, DB user, network access (Render free has no static IPs → allowlist 0.0.0.0/0,
   mitigated by strong credentials — **write this tradeoff in the README**).
 - Sandbox on Render = temp dir + path-guarded tools (no Docker-in-Docker). Note it in README.
@@ -66,6 +93,7 @@ Order matters: do 4.1–4.4 first (deployable demo). 4.5–4.6 are cut first if 
   structured "investigation so far" note (hypotheses, evidence, ruled-out causes, actions taken).
 - **Invariant:** never split a `tool_use` from its `tool_result`. Test it.
 - `compaction` span with before/after token counts. Ablation: compaction on vs off (accuracy, tokens).
+- Compaction changes the prompts → existing cassettes miss when it's on. Re-record whatever it affects.
 
 ## 4.6 Long-term memory `[HARNESS:MEMORY]` (cut 1st)
 
@@ -79,6 +107,13 @@ Order matters: do 4.1–4.4 first (deployable demo). 4.5–4.6 are cut first if 
 - Mention (don't build): vector search (Atlas Vector Search + embeddings) as the next step, and memory
   poisoning risks.
 
+## Combined ablation session (after 4.6)
+
+Day 3's 3.6 was deferred to here: run all ablations together, with one cost plan — model A vs B
+(haiku-4-5 vs sonnet-5), raw vs graph, compaction on vs off, memory on vs off — and write
+`docs/ablations.md`. Prerequisite: the human scores in `evals/judge_calibration.yaml` are filled in
+(blind) and `opspilot eval judge-check` reports the judge as trusted.
+
 ## Interview questions
 
 1. How does your UI resume a paused agent after a human approves? What if the server restarted in between?
@@ -86,6 +121,7 @@ Order matters: do 4.1–4.4 first (deployable demo). 4.5–4.6 are cut first if 
 3. Explain inner vs outer loops using your project.
 4. Full replay vs compaction: tradeoffs? What can go wrong with compaction?
 5. Short-term vs long-term memory in your system. How do you prevent bad memories?
-6. What protects your API bill on a public demo?
+6. What protects your API bill on a public demo? (replay by default — no usable key on the public
+   deployment; live mode owner-only behind rate limit, daily cap and per-run token budget)
 7. What would you change to run this for a real company? (auth, multi-tenant sandboxes, vector memory,
    OpenTelemetry export, eval dataset from prod traces)

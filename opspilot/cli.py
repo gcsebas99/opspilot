@@ -1,9 +1,7 @@
 import asyncio
 import subprocess
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,36 +23,26 @@ from evals.models import EvalCase
 from evals.report import EvalReport, build_report, failed_checks, write_report
 from evals.runner import regrade_sweep, run_suite
 from opspilot.config import get_settings
-from opspilot.context.assembler import CONTEXT_DIR, prompt_version
 from opspilot.env.cli import app as env_app
-from opspilot.env.generator import build_sandbox
-from opspilot.env.sandbox import Sandbox
-from opspilot.env.scenarios import get_scenario
-from opspilot.loops.graph import build_checkpointer, resume_react_graph, run_react_graph
-from opspilot.loops.react_raw import LoopEvent, RunResult, run_react_loop
+from opspilot.loops.graph import build_checkpointer
+from opspilot.loops.react_raw import LoopEvent, RunResult
 from opspilot.models.cassette import CassetteMiss
 from opspilot.models.factory import (
     LiveCallRefused,
     ModelMode,
-    build_chat_model,
     build_model_client,
     demo_cassette_path,
     resolve_mode,
 )
 from opspilot.observability.audit import (
-    record_loop_audit,
-    record_prompt_version_change_if_needed,
     verify_chain,
 )
-from opspilot.observability.instrumentation import record_loop_spans
 from opspilot.observability.metrics import build_dashboard, run_summary
-from opspilot.observability.pricing import cost_usd
-from opspilot.observability.tracer import Tracer
 from opspilot.policy.permissions import Role as PermRole
+from opspilot.runs import create_run, open_run, resume_graph, run_raw, start_graph
 from opspilot.store.base import Store
 from opspilot.store.factory import build_store
-from opspilot.store.models import EvalTrialDoc, RunDoc, SpanDoc
-from opspilot.tools.registry import build_default_registry
+from opspilot.store.models import EvalTrialDoc, SpanDoc
 
 app = typer.Typer(
     name="opspilot",
@@ -194,123 +182,48 @@ async def _run_async(
     cassette: Path | None,
 ) -> None:
     settings = get_settings()
+    store = build_store(settings)
+    await store.ensure_indexes()
 
     try:
-        scn = get_scenario(scenario_name)
+        handle = await create_run(
+            store,
+            settings,
+            scenario=scenario_name,
+            seed=seed,
+            role=role,
+            strategy=strategy,
+            mode=mode,
+            cassette=cassette,
+            sandbox_dir=Path("tmp/runs") / f"{scenario_name}-{seed}",
+        )
     except KeyError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
-
-    out_dir = Path("tmp/runs") / f"{scenario_name}-{seed}"
-    try:
-        sandbox = build_sandbox(scn, seed, out_dir)
     except NotImplementedError as exc:
         console.print(f"[yellow]{exc}[/yellow]")
         raise typer.Exit(code=1) from exc
 
-    console.print(f"[bold]alert:[/bold] {scn.alert_text}")
+    console.print(f"[bold]alert:[/bold] {handle.alert}")
     console.print(f"[dim]strategy:[/dim] {strategy}")
     _print_mode_banner(mode, cassette)
-    console.print(f"[dim]sandbox:[/dim] {sandbox.root}\n")
-
-    registry = build_default_registry(settings)
-
-    store = build_store(settings)
-    await store.ensure_indexes()
-    run_id = str(uuid.uuid4())
-    tracer = Tracer(store, run_id=run_id)
-    current_prompt_version = prompt_version(CONTEXT_DIR, registry.to_anthropic_schema())
-
-    # Must run before insert_run below -- it looks at the *previous* most
-    # recent run to detect a change, and this run's own RunDoc would
-    # otherwise already be that "previous" run by the time it checks.
-    await record_prompt_version_change_if_needed(
-        store,
-        run_id=run_id,
-        prompt_version=current_prompt_version,
-        model=settings.opspilot_model,
-        ts=datetime.now(UTC),
-    )
-    await store.insert_run(
-        RunDoc(
-            run_id=run_id,
-            created_at=datetime.now(UTC),
-            scenario=scenario_name,
-            seed=seed,
-            role=role,
-            model=settings.opspilot_model,
-            prompt_version=current_prompt_version,
-            strategy=strategy,
-            mode=mode,
-            cassette=str(cassette) if cassette is not None else None,
-        )
-    )
+    console.print(f"[dim]sandbox:[/dim] {handle.sandbox.root}\n")
 
     if strategy == "raw":
-        raw_model = build_model_client(settings, mode, cassette)
-        events: list[LoopEvent] = []
-
-        def on_event(event: LoopEvent) -> None:
-            events.append(event)
-            _print_event(event)
-
-        async with tracer.span(
-            "run", "react_loop", scenario=scenario_name, seed=seed, role=role, strategy="raw"
-        ) as run_span:
-            result = await run_react_loop(
-                model=raw_model,
-                registry=registry,
-                sandbox=sandbox,
-                alert=scn.alert_text,
-                settings=settings,
-                role=role,
-                max_steps=max_steps,
-                on_event=on_event,
-            )
-            # Must stay inside the `async with` -- record_span() reads the
-            # ambient parent span from a contextvar that's reset the moment
-            # this block exits, so writing the nested spans after exit
-            # would silently produce a flat trace (parent_id=None everywhere).
-            await record_loop_spans(tracer, run_span.start, events, model=settings.opspilot_model)
-            await record_loop_audit(
-                store,
-                run_span.start,
-                events,
-                run_id=run_id,
-                role=role,
-                prompt_version=current_prompt_version,
-                model=settings.opspilot_model,
-            )
+        result = await run_raw(handle, store, on_event=_print_event, max_steps=max_steps)
     else:
-        bound_model = build_chat_model(settings, registry, mode, cassette)
         checkpointer, mongo_client = build_checkpointer(settings)
         console.print(
             "[dim](graph strategy: live per-step output lands in `opspilot trace`)[/dim]\n"
         )
         try:
-            async with tracer.span(
-                "run", "react_graph", scenario=scenario_name, seed=seed, role=role, strategy="graph"
-            ):
-                result = await run_react_graph(
-                    model=bound_model,
-                    registry=registry,
-                    sandbox=sandbox,
-                    alert=scn.alert_text,
-                    settings=settings,
-                    tracer=tracer,
-                    store=store,
-                    checkpointer=checkpointer,
-                    run_id=run_id,
-                    prompt_version=current_prompt_version,
-                    role=role,
-                    max_steps=max_steps,
-                )
+            result = await start_graph(handle, store, checkpointer, max_steps=max_steps)
             # [HARNESS:HITL] The interactive half of the approval loop: the
             # graph itself only pauses (outcome="awaiting_approval") and
-            # resumes (resume_react_graph) -- this is the one place a human
+            # resumes (resume_graph) -- this is the one place a human
             # actually decides, via a blocking prompt. `opspilot approve`
-            # below is the out-of-process equivalent for a different
-            # operator picking up a run started elsewhere.
+            # and the web UI's approve button (4.1) are the out-of-process
+            # equivalents for an operator picking up a run started elsewhere.
             while result.outcome == "awaiting_approval":
                 pending = result.pending_approval
                 assert pending is not None
@@ -326,42 +239,14 @@ async def _run_async(
                 else:
                     reject_reason = typer.prompt("Rejection reason", default="")
                     decision = {"decision": "reject", "approver": role, "reason": reject_reason}
-                result = await resume_react_graph(
-                    model=bound_model,
-                    registry=registry,
-                    sandbox=sandbox,
-                    settings=settings,
-                    tracer=tracer,
-                    store=store,
-                    checkpointer=checkpointer,
-                    run_id=run_id,
-                    decision=decision,
-                    prompt_version=current_prompt_version,
-                    max_steps=max_steps,
+                result = await resume_graph(
+                    handle, store, checkpointer, decision, max_steps=max_steps
                 )
         finally:
             if mongo_client is not None:
                 mongo_client.close()
 
-    total_cost = cost_usd(
-        settings.opspilot_model,
-        input_tokens=result.tokens.input_tokens,
-        output_tokens=result.tokens.output_tokens,
-        cache_creation_input_tokens=result.tokens.cache_creation_input_tokens,
-        cache_read_input_tokens=result.tokens.cache_read_input_tokens,
-    )
-    await store.update_run(
-        run_id,
-        {
-            "outcome": result.outcome,
-            "steps": result.steps,
-            "tokens": result.tokens.model_dump(),
-            "cost_usd": total_cost,
-            "finished_at": datetime.now(UTC),
-        },
-    )
-
-    _print_summary(result, run_id)
+    _print_summary(result, handle.run.run_id)
 
 
 @app.command("trace")
@@ -506,31 +391,12 @@ async def _approve_async(approval_id: str, reject: bool, reason: str, approver: 
         console.print(f"[red]no approval found with id {approval_id!r}[/red]")
         raise typer.Exit(code=1)
 
-    run = await store.get_run(approval.run_id)
-    if run is None:
-        console.print(f"[red]no run found with id {approval.run_id!r}[/red]")
-        raise typer.Exit(code=1)
-
-    registry = build_default_registry(settings)
-    # Reconstruct the sandbox pointing at the paused run's already-mutated
-    # files -- build_sandbox() would regenerate the scenario from scratch
-    # and wipe whatever the run already did.
-    sandbox = Sandbox(root=Path("tmp/runs") / f"{run.scenario}-{run.seed}")
-
-    tracer = Tracer(store, run_id=run.run_id)
-    # Resume with the backend the run started with -- a replayed demo must
-    # not silently turn into a paid live call at the approval step.
-    if run.mode != "replay" and not settings.anthropic_api_key:
-        console.print(
-            f"[red]run {run.run_id} is mode={run.mode} but ANTHROPIC_API_KEY is empty[/red]"
-        )
-        raise typer.Exit(code=1)
-    bound_model = build_chat_model(
-        settings.model_copy(update={"opspilot_model": run.model}),
-        registry,
-        run.mode,
-        Path(run.cassette) if run.cassette is not None else None,
-    )
+    try:
+        handle = await open_run(store, settings, approval.run_id)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    run = handle.run
     checkpointer, mongo_client = build_checkpointer(settings)
 
     decision: dict[str, Any] = (
@@ -540,40 +406,13 @@ async def _approve_async(approval_id: str, reject: bool, reason: str, approver: 
     )
 
     try:
-        result = await resume_react_graph(
-            model=bound_model,
-            registry=registry,
-            sandbox=sandbox,
-            settings=settings,
-            tracer=tracer,
-            store=store,
-            checkpointer=checkpointer,
-            run_id=run.run_id,
-            decision=decision,
-            prompt_version=run.prompt_version,
-        )
+        result = await resume_graph(handle, store, checkpointer, decision)
+    except LiveCallRefused as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
     finally:
         if mongo_client is not None:
             mongo_client.close()
-
-    if result.outcome != "awaiting_approval":
-        total_cost = cost_usd(
-            run.model,
-            input_tokens=result.tokens.input_tokens,
-            output_tokens=result.tokens.output_tokens,
-            cache_creation_input_tokens=result.tokens.cache_creation_input_tokens,
-            cache_read_input_tokens=result.tokens.cache_read_input_tokens,
-        )
-        await store.update_run(
-            run.run_id,
-            {
-                "outcome": result.outcome,
-                "steps": result.steps,
-                "tokens": result.tokens.model_dump(),
-                "cost_usd": total_cost,
-                "finished_at": datetime.now(UTC),
-            },
-        )
 
     _print_summary(result, run.run_id)
     if result.outcome == "awaiting_approval":

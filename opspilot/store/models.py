@@ -20,6 +20,9 @@ class RunDoc(BaseModel):
     # a replayed run's cost_usd (recorded cost, $0 actual) can be told apart.
     mode: Literal["live", "record", "replay"] = "live"
     cassette: str | None = None
+    # Where this run's sandbox lives, so a resume (another request, another
+    # process) reopens *this* run's mutated files instead of guessing a path.
+    sandbox_dir: str | None = None
     outcome: str | None = None
     steps: int | None = None
     tokens: dict[str, int] = Field(default_factory=dict)
