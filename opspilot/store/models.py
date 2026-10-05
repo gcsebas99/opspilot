@@ -24,6 +24,12 @@ class RunDoc(BaseModel):
     # process) reopens *this* run's mutated files instead of guessing a path.
     sandbox_dir: str | None = None
     outcome: str | None = None
+    # Set when a background (web) run fails outright -- there's no terminal
+    # to print a traceback to, so the run page shows this instead.
+    error: str | None = None
+    # The submit_report / escalate payload. Kept here because the trace
+    # redacts large tool args (observability/tracer.py: redact_if_large).
+    report: dict[str, Any] | None = None
     steps: int | None = None
     tokens: dict[str, int] = Field(default_factory=dict)
     cost_usd: float | None = None

@@ -272,6 +272,7 @@ async def record_progress(store: Store, handle: RunHandle, result: RunResult) ->
         "steps": result.steps,
         "tokens": result.tokens.model_dump(),
         "cost_usd": cost,
+        "report": result.report,
     }
     if result.outcome != "awaiting_approval":
         updates["finished_at"] = datetime.now(UTC)

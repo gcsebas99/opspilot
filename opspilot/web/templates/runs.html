@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Runs{% endblock %}
+{% block content %}
+<h1>Runs</h1>
+<div class="panel">
+  {% if runs %}{% include "_runs_table.html" with context %}{% else %}<p class="muted">No runs yet. <a href="/">Start one</a>.</p>{% endif %}
+</div>
+{% endblock %}

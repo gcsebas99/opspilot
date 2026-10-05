@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Start an incident{% endblock %}
+{% block content %}
+<h1>Trigger an incident</h1>
+<p class="muted">
+  Pick a scenario on the fake ShopStack system. The agent investigates with real tools against a
+  sandbox; an <strong>operator</strong> run pauses before any destructive action until you approve it.
+</p>
+
+<div class="panel">
+  {% if paths %}
+  <form method="post" action="/runs">
+    <div class="row">
+      <div>
+        <label for="path">Scenario · role{% if replay %} (recorded paths){% endif %}</label>
+        <select id="path" name="path">
+          {% for scenario, seed, role in paths %}
+          <option value="{{ scenario }}|{{ seed }}|{{ role }}">{{ scenario }} · {{ role }} · seed {{ seed }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="strategy">Loop</label>
+        <select id="strategy" name="strategy">
+          <option value="graph">graph (LangGraph, supports approvals)</option>
+          <option value="raw">raw (hand-written loop)</option>
+        </select>
+      </div>
+      <div><button type="submit">Start run</button></div>
+    </div>
+  </form>
+  {% else %}
+  <p class="error">No recorded demo paths found in <span class="mono">evals/cassettes/demo/</span>.</p>
+  {% endif %}
+</div>
+
+{% if recent %}
+<h2>Recent runs</h2>
+<div class="panel">
+  {% include "_runs_table.html" with context %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,19 @@
+{% set rows = recent if recent is defined else runs %}
+<table>
+  <thead>
+    <tr><th>started (UTC)</th><th>scenario</th><th>role</th><th>loop</th><th>outcome</th><th>cost</th></tr>
+  </thead>
+  <tbody>
+    {% for run in rows %}
+    <tr>
+      <td><a href="/runs/{{ run.run_id }}">{{ run.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</a></td>
+      <td>{{ run.scenario }}</td>
+      <td>{{ run.role }}</td>
+      <td>{{ run.strategy }}</td>
+      <td><span class="badge {{ run.outcome or 'running' }}">{{ run.outcome or "running" }}</span></td>
+      <td class="mono">{% if run.cost_usd is not none %}${{ "%.4f"|format(run.cost_usd) }}{% if run.mode == "replay" %}*{% endif %}{% else %}–{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if replay %}<p class="muted" style="font-size:13px;margin:8px 0 0">* recorded cost of the replayed calls — this demo spends $0.</p>{% endif %}

@@ -1,0 +1,52 @@
+<div class="panel">
+  <div class="row" style="gap:28px">
+    <div><label>outcome</label><span class="badge {{ run.outcome or 'running' }}">{{ run.outcome or "running…" }}</span></div>
+    <div><label>steps</label>{{ run.steps if run.steps is not none else "–" }}</div>
+    <div><label>tokens</label><span class="mono">{{ run.tokens.values()|sum if run.tokens else "–" }}</span></div>
+    <div><label>cost</label><span class="mono">{% if run.cost_usd is not none %}${{ "%.4f"|format(run.cost_usd) }}{% else %}–{% endif %}</span>{% if run.mode == "replay" and run.cost_usd is not none %} <span class="muted" style="font-size:12px">(recorded; $0 spent)</span>{% endif %}</div>
+  </div>
+  {% if run.outcome == "awaiting_approval" %}
+  <p style="margin:14px 0 0"><strong>Paused for approval</strong> — a destructive action needs a human decision.</p>
+  {% endif %}
+  {% if run.error %}<p class="error" style="margin:14px 0 0">{{ run.error }}</p>{% endif %}
+</div>
+
+<h2>Trace</h2>
+<div class="panel">
+  {% if rows %}
+  <table>
+    <thead><tr><th style="width:38%">span</th><th>timeline</th><th style="width:80px">ms</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>
+          <span style="padding-left:{{ row.depth * 16 }}px" class="{{ 'error' if row.status == 'error' else '' }}">
+            <span class="muted">{{ row.kind }}</span> {{ row.name }}
+          </span>
+          {% if row.detail %}<div class="muted mono" style="padding-left:{{ row.depth * 16 }}px">{{ row.detail }}</div>{% endif %}
+        </td>
+        <td>
+          <div style="position:relative;height:10px;background:var(--line);border-radius:3px">
+            <div style="position:absolute;left:{{ '%.2f'|format(row.offset_pct) }}%;width:{{ '%.2f'|format(row.width_pct) }}%;height:10px;border-radius:3px;background:{{ 'var(--err)' if row.status == 'error' else 'var(--accent)' }}"></div>
+          </div>
+        </td>
+        <td class="mono">{{ "%.0f"|format(row.duration_ms) if row.duration_ms is not none else "…" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No spans yet…</p>
+  {% endif %}
+</div>
+
+{% if run.report %}
+<h2>{{ "Escalation" if run.outcome == "escalated" else "Report" }}</h2>
+<div class="panel">
+  <table>
+    {% for key, value in run.report.items() %}
+    <tr><th style="width:180px">{{ key }}</th><td>{% if value is iterable and value is not string %}<ul style="margin:0;padding-left:18px">{% for item in value %}<li>{{ item }}</li>{% endfor %}</ul>{% else %}{{ value }}{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}

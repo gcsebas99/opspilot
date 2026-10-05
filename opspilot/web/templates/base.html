@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OpsPilot{% endblock %} · OpsPilot</title>
+  {# htmx pinned + Subresource Integrity: the browser refuses the script if
+     the CDN ever serves different bytes. Hash verified against the file. #}
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.11/dist/htmx.min.js"
+          integrity="sha384-2OatzQy1H+Zd/IIrjr1TcuDGqLXeHhbooAyJY1KdQMKnr4LZ22k31GBLdYKHmVjg"
+          crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --line: #e3e3e0;
+      --accent: #2f5bd3; --ok: #1f8a4c; --warn: #b26b00; --err: #c0392b;
+      --banner-bg: #fff6dd; --banner-line: #f0dca0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141416; --panel: #1d1d20; --text: #ececee; --muted: #9b9ba3; --line: #2e2e33;
+        --accent: #7b9cff; --ok: #4cc283; --warn: #e5a440; --err: #ff6b5e;
+        --banner-bg: #2b2616; --banner-line: #4a4021;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    header { background: var(--panel); border-bottom: 1px solid var(--line); }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 0 16px; }
+    nav { display: flex; gap: 20px; align-items: center; height: 52px; }
+    nav a { color: var(--muted); text-decoration: none; }
+    nav a:hover, nav a.brand { color: var(--text); }
+    nav a.brand { font-weight: 700; margin-right: auto; }
+    .banner { background: var(--banner-bg); border-bottom: 1px solid var(--banner-line);
+              font-size: 13.5px; padding: 8px 0; }
+    main { padding: 24px 0 48px; }
+    h1 { font-size: 22px; margin: 0 0 16px; }
+    h2 { font-size: 17px; margin: 28px 0 10px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    th { color: var(--muted); font-weight: 600; }
+    a { color: var(--accent); }
+    .muted { color: var(--muted); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12.5px;
+             border: 1px solid var(--line); }
+    .badge.completed, .badge.ok { color: var(--ok); border-color: var(--ok); }
+    .badge.escalated, .badge.awaiting_approval { color: var(--warn); border-color: var(--warn); }
+    .badge.error, .badge.stuck, .badge.max_steps, .badge.budget_exceeded, .badge.no_report
+      { color: var(--err); border-color: var(--err); }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+    select, button { font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line);
+                     background: var(--panel); color: var(--text); }
+    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+    .error { color: var(--err); }
+    @media (max-width: 600px) { nav { gap: 12px; font-size: 14px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <nav>
+        <a class="brand" href="/">OpsPilot</a>
+        <a href="/">Start</a>
+        <a href="/runs">Runs</a>
+      </nav>
+    </div>
+  </header>
+  {% if replay %}
+  <div class="banner">
+    <div class="wrap">
+      <strong>Replay demo.</strong> Model responses are recordings of real Claude runs; tools,
+      permissions, approvals and traces execute live. Clone the repo and set
+      <span class="mono">ANTHROPIC_API_KEY</span> to run against the live model.
+    </div>
+  </div>
+  {% endif %}
+  <main>
+    <div class="wrap">
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+</body>
+</html>

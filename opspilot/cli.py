@@ -249,6 +249,18 @@ async def _run_async(
     _print_summary(result, handle.run.run_id)
 
 
+@app.command("web")
+def web(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (0.0.0.0 in a container)."),
+    port: int = typer.Option(8000, "--port", help="Port."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (dev)."),
+) -> None:
+    """Serve the web UI (FastAPI + HTMX). Replay mode by default -- $0."""
+    import uvicorn  # imported here: only this command needs a web server
+
+    uvicorn.run("opspilot.web.app:create_app", factory=True, host=host, port=port, reload=reload)
+
+
 @app.command("trace")
 def trace(run_id: str = typer.Argument(..., help="Run ID to show the waterfall for.")) -> None:
     """Print a waterfall tree of spans for one run."""
