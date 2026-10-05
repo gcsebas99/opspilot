@@ -102,6 +102,13 @@ def test_unknown_run(client: TestClient) -> None:
 
 
 def test_no_banner_in_live_mode(tmp_path: Path) -> None:
-    live = _REPLAY.model_copy(update={"opspilot_model_mode": "live", "anthropic_api_key": "sk-x"})
+    live = _REPLAY.model_copy(
+        update={
+            "opspilot_model_mode": "live",
+            "anthropic_api_key": "sk-x",
+            "opspilot_demo_live": True,
+            "opspilot_live_token": "owner-secret",
+        }
+    )
     with TestClient(create_app(live, store=MemoryStore(), runs_root=tmp_path)) as c:
         assert "Replay demo." not in c.get("/").text

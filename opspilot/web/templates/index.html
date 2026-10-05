@@ -28,6 +28,12 @@
           <option value="raw">raw (hand-written loop)</option>
         </select>
       </div>
+      {% if not replay %}
+      <div>
+        <label for="live_token">Owner token (live runs)</label>
+        <input id="live_token" name="live_token" type="password" autocomplete="off">
+      </div>
+      {% endif %}
       <div><button type="submit">Start run</button></div>
     </div>
   </form>

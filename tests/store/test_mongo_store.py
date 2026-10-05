@@ -1,6 +1,6 @@
 import os
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pymongo import AsyncMongoClient
@@ -168,3 +168,26 @@ async def test_mongo_claim_approval_succeeds_once(store: MongoStore) -> None:
     assert fetched is not None and (fetched.status, fetched.approver) == ("approved", "a")
     with pytest.raises(KeyError):
         await store.claim_approval("missing", {"status": "approved"})
+
+
+async def test_mongo_count_runs_since_filters_mode_and_time(store: MongoStore) -> None:
+    now = datetime.now(UTC)
+
+    def run(run_id: str, created_at: datetime, mode: str) -> RunDoc:
+        return RunDoc(
+            run_id=run_id,
+            created_at=created_at,
+            scenario="false_alarm",
+            seed=1,
+            role="viewer",
+            model="m",
+            prompt_version="v",
+            strategy="graph",
+            mode=mode,  # type: ignore[arg-type]
+        )
+
+    await store.insert_run(run("old", now - timedelta(days=1), "live"))
+    await store.insert_run(run("new-live", now, "live"))
+    await store.insert_run(run("new-replay", now, "replay"))
+
+    assert await store.count_runs_since(now - timedelta(hours=1), "live") == 1

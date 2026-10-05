@@ -15,6 +15,7 @@ from opspilot.models.factory import DEMO_CASSETTE_ROOT, demo_cassette_path, reco
 from opspilot.policy.permissions import Role, can_decide_approval
 from opspilot.runs import RunHandle, create_run, open_run, resume_graph, run_raw, start_graph
 from opspilot.store.base import Store
+from opspilot.web.guards import check_live_start
 
 log = logging.getLogger(__name__)
 
@@ -85,10 +86,17 @@ class WebRunService:
         return [(p.scenario, p.seed, p.role) for p in recorded_demo_paths(self.demo_root)]
 
     async def start(
-        self, scenario: str, seed: int, role: Role, strategy: Literal["raw", "graph"]
+        self,
+        scenario: str,
+        seed: int,
+        role: Role,
+        strategy: Literal["raw", "graph"],
+        live_token: str = "",
     ) -> str:
         if self.replay and (scenario, seed, role) not in self.offered_paths():
             raise InvalidRunRequest(f"{scenario} / seed {seed} / {role} isn't a recorded demo path")
+        # No-op in replay; in live mode: owner token, then the daily cap.
+        await check_live_start(self.settings, self.store, live_token)
         run_id = str(uuid.uuid4())
         cassette = (
             None

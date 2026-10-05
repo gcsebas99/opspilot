@@ -30,6 +30,19 @@ class Settings(BaseSettings):
     opspilot_store: Literal["memory", "mongo"] = Field(default="memory", alias="OPSPILOT_STORE")
     mongodb_uri: str = Field(default="", alias="MONGODB_URI")
 
+    # --- web demo guards (opspilot/web/guards.py) ---
+    # Always on: run starts per client IP per minute (replay costs CPU, not money).
+    opspilot_rate_limit_per_min: int = Field(default=10, alias="OPSPILOT_RATE_LIMIT_PER_MIN")
+    # Live mode only. The web app refuses to serve live runs unless this is
+    # true -- a second, deliberate switch on top of OPSPILOT_MODEL_MODE.
+    opspilot_demo_live: bool = Field(default=False, alias="OPSPILOT_DEMO_LIVE")
+    # Live mode only: starting a run requires this token (owner-only). Empty =
+    # live runs can't be started from the web at all.
+    opspilot_live_token: str = Field(default="", alias="OPSPILOT_LIVE_TOKEN")
+    opspilot_daily_run_cap: int = Field(default=20, alias="OPSPILOT_DAILY_RUN_CAP")
+    # Per-run token budget for web live runs -- lower than the CLI default.
+    opspilot_live_token_budget: int = Field(default=30_000, alias="OPSPILOT_LIVE_TOKEN_BUDGET")
+
 
 @lru_cache
 def get_settings() -> Settings:

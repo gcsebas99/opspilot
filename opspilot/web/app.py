@@ -16,6 +16,12 @@ from opspilot.policy.permissions import Role, can_decide_approval
 from opspilot.store.base import Store
 from opspilot.store.factory import build_store
 from opspilot.store.models import RunDoc
+from opspilot.web.guards import (
+    GuardRejected,
+    RateLimiter,
+    check_live_config,
+    live_run_settings,
+)
 from opspilot.web.service import Actor, DecisionError, InvalidRunRequest, WebRunService
 from opspilot.web.trace_view import build_waterfall
 
@@ -63,6 +69,13 @@ async def _render(
     )
 
 
+async def _guard_error(request: Request, exc: GuardRejected) -> HTMLResponse:
+    response = await _render(request, "error.html", exc.status_code, message=str(exc))
+    if exc.retry_after_s is not None:
+        response.headers["Retry-After"] = str(exc.retry_after_s)
+    return response
+
+
 def _is_finished(run: RunDoc) -> bool:
     return run.finished_at is not None or run.outcome == "error"
 
@@ -80,11 +93,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved = settings or get_settings()
+        check_live_config(resolved)  # refuse to serve a misconfigured live demo at all
         resolved_store = store or build_store(resolved)
         await resolved_store.ensure_indexes()
         checkpointer, mongo_client = build_checkpointer(resolved)
-        service = WebRunService(resolved_store, resolved, checkpointer, runs_root, demo_root)
+        service = WebRunService(
+            resolved_store, live_run_settings(resolved), checkpointer, runs_root, demo_root
+        )
         app.state.service = service
+        app.state.rate_limiter = RateLimiter(resolved.opspilot_rate_limit_per_min)
         try:
             yield
         finally:
@@ -106,13 +123,31 @@ def create_app(
 
     @app.post("/runs")
     async def start_run(
-        request: Request, path: str = Form(...), strategy: str = Form("graph")
+        request: Request,
+        path: str = Form(...),
+        strategy: str = Form("graph"),
+        live_token: str = Form(""),
     ) -> Response:
+        try:
+            # Behind a proxy (Render), uvicorn's --proxy-headers makes this the
+            # real client address -- never parse X-Forwarded-For by hand here.
+            client = request.client.host if request.client else "unknown"
+            request.app.state.rate_limiter.check(client)
+        except GuardRejected as exc:
+            return await _guard_error(request, exc)
         try:
             scenario, seed, role = path.split("|")
             if strategy not in ("raw", "graph") or role not in ("viewer", "operator", "admin"):
                 raise InvalidRunRequest(f"invalid strategy/role: {strategy!r}, {role!r}")
-            run_id = await _service(request).start(scenario, int(seed), role, strategy)  # type: ignore[arg-type]
+            run_id = await _service(request).start(
+                scenario,
+                int(seed),
+                role,  # type: ignore[arg-type]
+                strategy,  # type: ignore[arg-type]
+                live_token=live_token,
+            )
+        except GuardRejected as exc:
+            return await _guard_error(request, exc)
         except (InvalidRunRequest, ValueError) as exc:
             return await _render(request, "error.html", status_code=400, message=str(exc))
         # 303 See Other: after a POST, the browser must GET the run page.

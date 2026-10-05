@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from opspilot.store.models import ApprovalDoc, AuditDoc, EvalTrialDoc, RunDoc, SpanDoc
@@ -26,6 +27,9 @@ class MemoryStore:
 
     async def list_runs(self) -> list[RunDoc]:
         return sorted(self._runs.values(), key=lambda r: r.created_at, reverse=True)
+
+    async def count_runs_since(self, since: datetime, mode: str) -> int:
+        return sum(1 for r in self._runs.values() if r.mode == mode and r.created_at >= since)
 
     async def update_run(self, run_id: str, updates: dict[str, Any]) -> None:
         existing = self._runs.get(run_id)

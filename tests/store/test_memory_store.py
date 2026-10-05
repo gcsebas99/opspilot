@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -257,3 +257,26 @@ async def test_claim_approval_succeeds_once(store: MemoryStore) -> None:
 async def test_claim_approval_missing_raises(store: MemoryStore) -> None:
     with pytest.raises(KeyError):
         await store.claim_approval("nope", {"status": "approved"})
+
+
+async def test_count_runs_since_filters_mode_and_time(store: MemoryStore) -> None:
+    now = datetime.now(UTC)
+    for run_id, created_at, mode in [
+        ("old", now - timedelta(days=1), "live"),
+        ("new-live", now, "live"),
+        ("new-replay", now, "replay"),
+    ]:
+        await store.insert_run(
+            RunDoc(
+                run_id=run_id,
+                created_at=created_at,
+                scenario="false_alarm",
+                seed=1,
+                role="viewer",
+                model="m",
+                prompt_version="v",
+                strategy="graph",
+                mode=mode,  # type: ignore[arg-type]
+            )
+        )
+    assert await store.count_runs_since(now - timedelta(hours=1), "live") == 1

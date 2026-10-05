@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 import pymongo
@@ -66,6 +67,11 @@ class MongoStore:
     async def list_runs(self) -> list[RunDoc]:
         docs = [doc async for doc in self._db.runs.find(sort=[("created_at", pymongo.DESCENDING)])]
         return [RunDoc.model_validate(doc) for doc in docs]
+
+    async def count_runs_since(self, since: datetime, mode: str) -> int:
+        # Server-side count on the indexed created_at field -- no documents
+        # come back over the wire, just the number.
+        return await self._db.runs.count_documents({"mode": mode, "created_at": {"$gte": since}})
 
     async def update_run(self, run_id: str, updates: dict[str, Any]) -> None:
         result = await self._db.runs.update_one({"run_id": run_id}, {"$set": updates})
