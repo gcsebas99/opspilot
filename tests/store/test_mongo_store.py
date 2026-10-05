@@ -147,3 +147,24 @@ async def test_mongo_store_approval_datetimes_stay_tz_aware(store: MongoStore) -
 
     wait = datetime.now(UTC) - fetched.requested_at  # raises if naive
     assert wait.total_seconds() >= 0
+
+
+async def test_mongo_claim_approval_succeeds_once(store: MongoStore) -> None:
+    await store.insert_approval(
+        ApprovalDoc(
+            approval_id="claim-1",
+            run_id="r",
+            tool="rollback_config",
+            args={},
+            reason="x",
+            requested_at=datetime.now(UTC),
+        )
+    )
+    first = await store.claim_approval("claim-1", {"status": "approved", "approver": "a"})
+    second = await store.claim_approval("claim-1", {"status": "rejected", "approver": "b"})
+
+    assert (first, second) == (True, False)
+    fetched = await store.get_approval("claim-1")
+    assert fetched is not None and (fetched.status, fetched.approver) == ("approved", "a")
+    with pytest.raises(KeyError):
+        await store.claim_approval("missing", {"status": "approved"})

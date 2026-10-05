@@ -35,6 +35,16 @@ _MARK_BUDGET_EXCEEDED = "mark_budget_exceeded"
 _MARK_NO_REPORT = "mark_no_report"
 
 
+class ApprovalAlreadyDecided(RuntimeError):
+    """Another request decided this approval first (see resume_react_graph)."""
+
+    def __init__(self, approval_id: str, *, status: str, approver: str | None) -> None:
+        super().__init__(f"approval {approval_id} was already {status} by {approver or 'someone'}")
+        self.approval_id = approval_id
+        self.status = status
+        self.approver = approver
+
+
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     step: int
@@ -710,10 +720,25 @@ async def resume_react_graph(
 
     decided_at = datetime.now(UTC)
     status = "rejected" if decision["decision"] == "reject" else "approved"
-    await store.update_approval(
+    # [HARNESS:HITL] Exactly-once decision -- claim the approval atomically.
+    # WHY: in a web UI, two decisions can race (double-click, two tabs, two
+    # operators). Both would pass the "is it paused?" check above, and both
+    # would resume the graph: duplicate audit entries, and possibly the
+    # destructive tool running twice. Only the request that flips
+    # pending -> decided may resume; everyone else is told who won.
+    # INTERVIEW: "Two people click approve at once -- what happens?" ->
+    # compare-and-set on the approval's status; the loser gets a 409.
+    claimed = await store.claim_approval(
         approval_id,
         {"status": status, "decided_at": decided_at, "approver": decision.get("approver")},
     )
+    if not claimed:
+        current = await store.get_approval(approval_id)
+        raise ApprovalAlreadyDecided(
+            approval_id,
+            status=current.status if current else "unknown",
+            approver=current.approver if current else None,
+        )
     wait_ms = (decided_at - approval.requested_at).total_seconds() * 1000
     await tracer.record_span(
         "approval_wait",

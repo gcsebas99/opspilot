@@ -2,7 +2,14 @@ import pytest
 from pydantic import BaseModel
 
 from opspilot.env.sandbox import Sandbox
-from opspilot.policy.permissions import Allow, Deny, RequireApproval, Role, decide
+from opspilot.policy.permissions import (
+    Allow,
+    Deny,
+    RequireApproval,
+    Role,
+    can_decide_approval,
+    decide,
+)
 from opspilot.tools.base import Risk, Tool, ToolResult
 
 
@@ -97,3 +104,11 @@ def test_out_of_scope_never_loosens_the_base_matrix(role: Role, risk: Risk) -> N
         assert type(out_of_scope_decision) is not Deny
     else:
         assert type(out_of_scope_decision) is type(in_scope_decision)
+
+
+@pytest.mark.parametrize(
+    ("role", "allowed"),
+    [("viewer", False), ("operator", True), ("admin", True), ("system", False)],
+)
+def test_who_can_decide_approvals(role: Role, allowed: bool) -> None:
+    assert can_decide_approval(role) is allowed

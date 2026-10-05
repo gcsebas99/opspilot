@@ -112,6 +112,19 @@ class MongoStore:
         if result.matched_count == 0:
             raise KeyError(f"no approval {approval_id!r} to update")
 
+    async def claim_approval(self, approval_id: str, updates: dict[str, Any]) -> bool:
+        # The filter does the check: only a still-pending doc matches, and
+        # Mongo applies a single-document update atomically -- two racing
+        # requests can't both match.
+        result = await self._db.approvals.update_one(
+            {"approval_id": approval_id, "status": "pending"}, {"$set": updates}
+        )
+        if result.matched_count == 1:
+            return True
+        if await self._db.approvals.count_documents({"approval_id": approval_id}, limit=1) == 0:
+            raise KeyError(f"no approval {approval_id!r} to claim")
+        return False
+
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         docs = [doc async for doc in self._db.approvals.find({"status": "pending"})]
         return [ApprovalDoc.model_validate(doc) for doc in docs]

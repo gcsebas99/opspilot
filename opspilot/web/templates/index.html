@@ -4,7 +4,9 @@
 <h1>Trigger an incident</h1>
 <p class="muted">
   Pick a scenario on the fake ShopStack system. The agent investigates with real tools against a
-  sandbox; an <strong>operator</strong> run pauses before any destructive action until you approve it.
+  sandbox. The <em>agent role</em> sets what the agent may do on its own: a <strong>viewer</strong>
+  agent can only recommend fixes; an <strong>operator</strong> agent pauses before any destructive
+  action until a human (you, acting as operator or admin) approves it.
 </p>
 
 <div class="panel">
@@ -12,7 +14,7 @@
   <form method="post" action="/runs">
     <div class="row">
       <div>
-        <label for="path">Scenario · role{% if replay %} (recorded paths){% endif %}</label>
+        <label for="path">Scenario · agent role{% if replay %} (recorded paths){% endif %}</label>
         <select id="path" name="path">
           {% for scenario, seed, role in paths %}
           <option value="{{ scenario }}|{{ seed }}|{{ role }}">{{ scenario }} · {{ role }} · seed {{ seed }}</option>

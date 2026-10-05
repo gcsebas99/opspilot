@@ -1,9 +1,11 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opspilot.config import Settings
+from opspilot.loops.graph import ApprovalAlreadyDecided
 from opspilot.models.factory import (
     DEMO_CASSETTE_ROOT,
     LiveCallRefused,
@@ -149,3 +151,31 @@ def test_catalog_ignores_junk_unknown_scenarios_and_roles(tmp_path: Path) -> Non
 
     found = [(p.scenario, p.seed, p.role) for p in recorded_demo_paths(tmp_path)]
     assert found == [("false_alarm", 7, "viewer")]
+
+
+async def test_two_concurrent_resumes_only_one_wins(tmp_path: Path) -> None:
+    """Double-click / two tabs / two operators: both requests reach resume at
+    once. The atomic claim lets exactly one through; the other is told who
+    won, and the audit log records exactly one decision."""
+    store = MemoryStore()
+    checkpointer = InMemorySaver()
+    handle = await _operator_run(tmp_path, store)
+    await start_graph(handle, store, checkpointer)
+
+    a = await open_run(store, _SETTINGS, handle.run.run_id)
+    b = await open_run(store, _SETTINGS, handle.run.run_id)
+    results = await asyncio.gather(
+        resume_graph(a, store, checkpointer, {"decision": "approve", "approver": "alice"}),
+        resume_graph(b, store, checkpointer, {"decision": "approve", "approver": "bob"}),
+        return_exceptions=True,
+    )
+
+    losers = [r for r in results if isinstance(r, ApprovalAlreadyDecided)]
+    winners = [r for r in results if not isinstance(r, BaseException)]
+    assert len(winners) == 1 and len(losers) == 1
+    assert winners[0].outcome == "completed"
+    assert losers[0].approver == "alice"  # gather starts `a` first, so alice wins
+    decisions = [
+        e for e in await store.list_audit(handle.run.run_id) if e.action == "approval_decision"
+    ]
+    assert [e.actor for e in decisions] == ["alice"]

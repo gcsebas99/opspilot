@@ -70,3 +70,25 @@ def decide(role: Role, tool: Tool, *, in_scope: bool = True) -> Decision:
     if outcome == "deny":
         return Deny(f"{role} role cannot run {tool.name!r}; recommend it in your report instead.")
     return RequireApproval(f"{tool.name!r} requires human approval before it can run.")
+
+
+# Which *human* roles may decide a pending approval. Separate from _MATRIX on
+# purpose: that table governs what the *agent* may do; this one governs what
+# the person clicking "approve" may do.
+_CAN_DECIDE_APPROVAL: dict[Role, bool] = {
+    "viewer": False,
+    "operator": True,
+    "admin": True,
+    "system": False,  # automation never approves its own actions
+}
+
+
+# [HARNESS:PERM] Approving is a permission, enforced server-side.
+# WHY: hiding the approve button from viewers is UX, not security -- anyone
+# can POST to /approvals/{id}. The server checks this table before any
+# decision is recorded, the same way decide() gates the agent's tools.
+# INTERVIEW: "Who can approve an agent's destructive action, and how is
+# that enforced?" -> a role table checked on the server for every decision,
+# with the approver's identity written to the audit log.
+def can_decide_approval(role: Role) -> bool:
+    return _CAN_DECIDE_APPROVAL[role]

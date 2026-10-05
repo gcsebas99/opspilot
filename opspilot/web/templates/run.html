@@ -4,6 +4,10 @@
 <h1>{{ run.scenario }} <span class="muted" style="font-weight:400">· {{ run.role }} · {{ run.strategy }}</span></h1>
 <p class="muted mono">run {{ run.run_id }} · model {{ run.model }} · mode {{ run.mode }}</p>
 
+{# The approval card has its own region: it stops polling (286) as soon as
+   a card is shown, so typing a reject reason is never interrupted. #}
+<div hx-get="/runs/{{ run.run_id }}/approval" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
+
 {# Polls every 2s; the server answers 286 once the run is finished, which
    makes htmx stop polling. "load" fills it immediately on page open. #}
 <div hx-get="/runs/{{ run.run_id }}/live" hx-trigger="load, every 2s" hx-swap="innerHTML">

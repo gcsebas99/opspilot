@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Approvals{% endblock %}
+{% block content %}
+<h1>Pending approvals</h1>
+<div class="panel">
+  {% if approvals %}
+  <table>
+    <thead><tr><th>requested (UTC)</th><th>action</th><th>reason</th><th></th></tr></thead>
+    <tbody>
+      {% for a in approvals %}
+      <tr>
+        <td>{{ a.requested_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+        <td class="mono">{{ a.tool }}({{ a.args | tojson }})</td>
+        <td class="muted">{{ a.reason }}</td>
+        <td><a href="/runs/{{ a.run_id }}">review →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nothing is waiting for a decision. Start an <strong>operator</strong> run to see the approval flow.</p>
+  {% endif %}
+</div>
+{% endblock %}

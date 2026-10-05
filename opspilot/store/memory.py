@@ -63,6 +63,17 @@ class MemoryStore:
             raise KeyError(f"no approval {approval_id!r} to update")
         self._approvals[approval_id] = existing.model_copy(update=updates)
 
+    async def claim_approval(self, approval_id: str, updates: dict[str, Any]) -> bool:
+        # Atomic on a single event loop: no `await` between the check and the
+        # write, so no other coroutine can run in between.
+        existing = self._approvals.get(approval_id)
+        if existing is None:
+            raise KeyError(f"no approval {approval_id!r} to claim")
+        if existing.status != "pending":
+            return False
+        self._approvals[approval_id] = existing.model_copy(update=updates)
+        return True
+
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         return [a for a in self._approvals.values() if a.status == "pending"]
 

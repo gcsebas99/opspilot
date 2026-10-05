@@ -241,3 +241,19 @@ async def test_avg_cost_by_scenario(store: MemoryStore) -> None:
 
     assert avg_cost["checkout_pool_exhaustion"] == pytest.approx(0.15)
     assert avg_cost["payments_bad_deploy"] == pytest.approx(0.50)
+
+
+async def test_claim_approval_succeeds_once(store: MemoryStore) -> None:
+    await store.insert_approval(_approval())
+
+    first = await store.claim_approval("appr-1", {"status": "approved", "approver": "a"})
+    second = await store.claim_approval("appr-1", {"status": "rejected", "approver": "b"})
+
+    assert (first, second) == (True, False)
+    fetched = await store.get_approval("appr-1")
+    assert fetched is not None and (fetched.status, fetched.approver) == ("approved", "a")
+
+
+async def test_claim_approval_missing_raises(store: MemoryStore) -> None:
+    with pytest.raises(KeyError):
+        await store.claim_approval("nope", {"status": "approved"})
