@@ -9,9 +9,11 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from evals.report import REPORTS_DIR, load_report
 from opspilot.config import Settings, get_settings
 from opspilot.loops.graph import build_checkpointer
 from opspilot.models.factory import DEMO_CASSETTE_ROOT
+from opspilot.observability.metrics import build_dashboard
 from opspilot.policy.permissions import Role, can_decide_approval
 from opspilot.store.base import Store
 from opspilot.store.factory import build_store
@@ -27,6 +29,7 @@ from opspilot.web.trace_view import build_waterfall
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 DEFAULT_RUNS_ROOT = Path("tmp/web_runs")
+DEFAULT_BASELINE = Path("evals/baselines/smoke.json")
 # HTMX treats this status as "stop polling" (htmx.org/docs, "Polling").
 HTMX_STOP_POLLING = 286
 
@@ -86,6 +89,8 @@ def create_app(
     store: Store | None = None,
     runs_root: Path = DEFAULT_RUNS_ROOT,
     demo_root: Path = DEMO_CASSETTE_ROOT,
+    reports_dir: Path = REPORTS_DIR,
+    baseline_path: Path = DEFAULT_BASELINE,
 ) -> FastAPI:
     """App factory -- tests pass their own settings/store/paths; `opspilot
     web` and uvicorn call it with none and get env-configured defaults."""
@@ -182,6 +187,33 @@ def create_app(
             run=run,
             finished=finished,
             rows=build_waterfall(spans, now=datetime.now(UTC)),
+        )
+
+    @app.get("/metrics", response_class=HTMLResponse)
+    async def metrics(request: Request) -> HTMLResponse:
+        """The Day 2 aggregations (Mongo pipelines / MemoryStore equivalents)."""
+        dashboard = await build_dashboard(_service(request).store)
+        return await _render(request, "metrics.html", dashboard=dashboard)
+
+    @app.get("/evals", response_class=HTMLResponse)
+    async def evals(request: Request) -> HTMLResponse:
+        # Newest local report if any (a dev machine), else the committed
+        # baseline (a fresh deploy -- evals/reports/ is gitignored).
+        local = sorted(reports_dir.glob("*.json"))
+        source = local[-1] if local else baseline_path
+        if not source.exists():
+            return await _render(request, "error.html", 404, message="No eval report found.")
+        report = load_report(source)
+        by_case: dict[str, list[Any]] = {}
+        for trial in report.trials:
+            by_case.setdefault(trial.case_id, []).append(trial)
+        return await _render(
+            request,
+            "evals.html",
+            report=report,
+            source=source,
+            is_baseline=source == baseline_path,
+            by_case=by_case,
         )
 
     @app.post("/act-as")

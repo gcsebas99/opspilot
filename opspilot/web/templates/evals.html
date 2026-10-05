@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Evals{% endblock %}
+{% block content %}
+{% set m = report.metrics %}
+<h1>Evals <span class="muted" style="font-weight:400">· {{ report.meta.suite }}</span></h1>
+<p class="muted">
+  {% if is_baseline %}The committed CI baseline ({{ source }}) — what every push is gated against.
+  {% else %}The newest local report ({{ source.name }}).{% endif %}
+  Agent <span class="mono">{{ report.meta.model }}</span>, {{ report.meta.strategy }} loop,
+  mode {{ report.meta.mode }}, k={{ report.meta.k }}{% if report.meta.judged %}, judge
+  <span class="mono">{{ report.meta.judge_model }}</span>{% endif %} · git <span class="mono">{{ report.meta.git_sha }}</span>
+</p>
+
+<div class="panel">
+  <div class="row" style="gap:32px">
+    <div><label>pass@1</label><strong>{{ "%.0f"|format(m.overall.pass_at_1 * 100) }}%</strong></div>
+    <div><label>pass@k (capability)</label><strong>{{ "%.0f"|format(m.overall.pass_at_k * 100) }}%</strong></div>
+    <div><label>pass^k (reliability)</label><strong>{{ "%.0f"|format(m.overall.pass_hat_k * 100) }}%</strong></div>
+    <div><label>cases · trials</label>{{ m.overall.cases }} · {{ m.overall.trials }}</div>
+    {% if m.judge_avg is not none %}<div><label>judge avg</label>{{ "%.2f"|format(m.judge_avg) }} / 5</div>{% endif %}
+    {% if m.agent_cost %}<div><label>agent cost / trial</label><span class="mono">${{ "%.4f"|format(m.agent_cost.mean) }}</span></div>{% endif %}
+  </div>
+</div>
+
+<h2>Cases</h2>
+<div class="panel">
+  <table>
+    <thead><tr><th>case</th><th>verdict</th><th>passed</th><th>why it failed</th></tr></thead>
+    <tbody>
+    {% for case_id, trials in by_case|dictsort %}
+      {% set reasons = [] %}
+      {% for t in trials %}{% for r in t.failed_checks %}{% if r not in reasons %}{% set _ = reasons.append(r) %}{% endif %}{% endfor %}{% endfor %}
+      <tr>
+        <td>{{ case_id }}</td>
+        <td><span class="badge {{ 'completed' if m.case_verdicts[case_id] == 'pass' else ('escalated' if m.case_verdicts[case_id] == 'flaky' else 'error') }}">{{ m.case_verdicts[case_id] }}</span></td>
+        <td class="mono">{{ trials|selectattr("passed")|list|length }}/{{ trials|length }}</td>
+        <td class="muted" style="font-size:13px">{{ reasons|join("; ") }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="row" style="gap:16px;align-items:stretch;margin-top:16px">
+  <div class="panel" style="flex:1;min-width:240px">
+    <h2 style="margin-top:0">By grader</h2>
+    <table>{% for name, rate in m.per_grader|dictsort %}
+      <tr><td>{{ name }}</td><td class="mono">{{ "%.0f"|format(rate * 100) }}%</td></tr>{% endfor %}</table>
+  </div>
+  <div class="panel" style="flex:1;min-width:240px">
+    <h2 style="margin-top:0">By tag (pass^k)</h2>
+    <table>{% for tag, r in m.per_tag|dictsort %}
+      <tr><td>{{ tag }}</td><td class="mono">{{ "%.0f"|format(r.pass_hat_k * 100) }}%</td></tr>{% endfor %}</table>
+  </div>
+</div>
+<p class="muted" style="font-size:13px">pass@k: solved in at least one of k trials. pass^k: solved in all k.
+A <em>flaky</em> case passed some trials but not all. Run locally: <span class="mono">uv run opspilot eval --suite smoke --k 3</span> ($0, replay).</p>
+{% endblock %}
