@@ -56,6 +56,9 @@ class MongoStore:
         await self._db.approvals.create_index([("run_id", pymongo.ASCENDING)])
         await self._db.eval_runs.create_index([("sweep_id", pymongo.ASCENDING)])
         await self._db.eval_runs.create_index([("case_id", pymongo.ASCENDING)])
+        # unique=True is what makes claim_idempotency_key atomic across
+        # requests, workers and instances: the database refuses the second insert.
+        await self._db.webhook_deliveries.create_index([("key", pymongo.ASCENDING)], unique=True)
 
     async def insert_run(self, run: RunDoc) -> None:
         await self._db.runs.insert_one(run.model_dump())
@@ -130,6 +133,17 @@ class MongoStore:
         if await self._db.approvals.count_documents({"approval_id": approval_id}, limit=1) == 0:
             raise KeyError(f"no approval {approval_id!r} to claim")
         return False
+
+    async def claim_idempotency_key(self, key: str, run_id: str) -> str | None:
+        try:
+            await self._db.webhook_deliveries.insert_one({"key": key, "run_id": run_id})
+            return None
+        except pymongo.errors.DuplicateKeyError:
+            existing = await self._db.webhook_deliveries.find_one({"key": key})
+            return str(existing["run_id"]) if existing else None
+
+    async def release_idempotency_key(self, key: str) -> None:
+        await self._db.webhook_deliveries.delete_one({"key": key})
 
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         docs = [doc async for doc in self._db.approvals.find({"status": "pending"})]

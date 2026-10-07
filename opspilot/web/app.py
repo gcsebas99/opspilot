@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 
 from evals.report import REPORTS_DIR, load_report
 from opspilot.config import Settings, get_settings
@@ -26,6 +27,15 @@ from opspilot.web.guards import (
 )
 from opspilot.web.service import Actor, DecisionError, InvalidRunRequest, WebRunService
 from opspilot.web.trace_view import build_waterfall
+from opspilot.web.webhooks import (
+    SIGNATURE_HEADER,
+    TIMESTAMP_HEADER,
+    AlertPayload,
+    InvalidSignature,
+    UnroutableAlert,
+    route_alert,
+    verify,
+)
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 DEFAULT_RUNS_ROOT = Path("tmp/web_runs")
@@ -214,6 +224,69 @@ def create_app(
             source=source,
             is_baseline=source == baseline_path,
             by_case=by_case,
+        )
+
+    # [HARNESS:LOOP] Event-driven outer loop: an alert starts the agent.
+    # WHY: the inner ReAct loop is goal-driven (investigate until a report);
+    # this is the loop *around* it -- something in the world happens and
+    # the agent wakes up, with no human clicking "start". It runs as the
+    # `system` role, so destructive actions still wait for a human approval.
+    # INTERVIEW: "Inner vs outer loops?" -> inner: think/act/observe until
+    # done; outer: what *starts* runs -- events (this webhook), time (cron),
+    # heartbeats (the canary) -- and what retries them.
+    @app.post("/webhooks/alert")
+    async def alert_webhook(request: Request) -> JSONResponse:
+        service = _service(request)
+        secret = service.settings.opspilot_webhook_secret
+        if not secret:
+            return JSONResponse({"error": "webhook disabled (no secret configured)"}, 503)
+        body = await request.body()  # the raw bytes are what was signed
+        try:
+            verify(
+                secret,
+                request.headers.get(TIMESTAMP_HEADER),
+                request.headers.get(SIGNATURE_HEADER),
+                body,
+            )
+        except InvalidSignature as exc:
+            return JSONResponse({"error": f"invalid signature: {exc}"}, 401)
+        try:
+            alert = AlertPayload.model_validate_json(body)
+            scenario = route_alert(alert)
+            run_id, duplicate = await service.start_from_alert(alert, scenario)
+        except (ValidationError, UnroutableAlert, InvalidRunRequest) as exc:
+            return JSONResponse({"error": str(exc)}, 422)
+        except GuardRejected as exc:
+            return JSONResponse({"error": str(exc)}, exc.status_code)
+        return JSONResponse(
+            {
+                "run_id": run_id,
+                "duplicate": duplicate,
+                "status_url": f"/api/runs/{run_id}",
+                "run_url": f"/runs/{run_id}",
+            },
+            # 202 Accepted: the run was started, not finished. A duplicate
+            # delivery is 200: nothing new was accepted.
+            200 if duplicate else 202,
+        )
+
+    @app.get("/api/runs/{run_id}")
+    async def run_status(request: Request, run_id: str) -> JSONResponse:
+        """Machine-readable run status (the canary polls this)."""
+        run = await _service(request).store.get_run(run_id)
+        if run is None:
+            return JSONResponse({"error": "no such run"}, 404)
+        return JSONResponse(
+            {
+                "run_id": run.run_id,
+                "scenario": run.scenario,
+                "role": run.role,
+                "trigger": run.trigger,
+                "outcome": run.outcome,
+                "finished": _is_finished(run),
+                "report": run.report,
+                "error": run.error,
+            }
         )
 
     @app.post("/act-as")

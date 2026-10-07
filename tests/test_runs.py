@@ -142,7 +142,8 @@ def test_catalog_lists_committed_demo_cassettes() -> None:
 def test_catalog_ignores_junk_unknown_scenarios_and_roles(tmp_path: Path) -> None:
     for name in [
         "false_alarm-s7-viewer.jsonl",  # valid
-        "false_alarm-s7-system.jsonl",  # system role isn't offered in the UI
+        "false_alarm-s7-system.jsonl",  # valid: webhook runs (the UI filters it out)
+        "false_alarm-s7-root.jsonl",  # not a role
         "nonexistent_scenario-s1-viewer.jsonl",
         "README.jsonl",
         "false_alarm-s7-viewer.judge.jsonl",  # stem has a dot -> no match
@@ -150,7 +151,7 @@ def test_catalog_ignores_junk_unknown_scenarios_and_roles(tmp_path: Path) -> Non
         (tmp_path / name).write_text("")
 
     found = [(p.scenario, p.seed, p.role) for p in recorded_demo_paths(tmp_path)]
-    assert found == [("false_alarm", 7, "viewer")]
+    assert found == [("false_alarm", 7, "system"), ("false_alarm", 7, "viewer")]
 
 
 async def test_two_concurrent_resumes_only_one_wins(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from opspilot.policy.permissions import Role, can_decide_approval
 from opspilot.runs import RunHandle, create_run, open_run, resume_graph, run_raw, start_graph
 from opspilot.store.base import Store
 from opspilot.web.guards import check_live_start
+from opspilot.web.webhooks import AlertPayload
 
 log = logging.getLogger(__name__)
 
@@ -80,10 +81,14 @@ class WebRunService:
     def replay(self) -> bool:
         return self.settings.opspilot_model_mode == "replay"
 
-    def offered_paths(self) -> list[tuple[str, int, str]]:
-        """What the start form may offer: in replay, exactly the recorded
-        demo paths -- so a visitor can't pick a run with nothing to replay."""
+    def recorded_paths(self) -> list[tuple[str, int, str]]:
+        """Every scenario x seed x role a replay can serve (incl. `system`)."""
         return [(p.scenario, p.seed, p.role) for p in recorded_demo_paths(self.demo_root)]
+
+    def offered_paths(self) -> list[tuple[str, int, str]]:
+        """What the start form may offer: recorded paths for *human-started*
+        runs. `system` is the webhook's role, never picked in the UI."""
+        return [p for p in self.recorded_paths() if p[2] != "system"]
 
     async def start(
         self,
@@ -93,11 +98,64 @@ class WebRunService:
         strategy: Literal["raw", "graph"],
         live_token: str = "",
     ) -> str:
-        if self.replay and (scenario, seed, role) not in self.offered_paths():
+        offered = (scenario, seed, role) in self.offered_paths()
+        if role == "system" or (self.replay and not offered):
             raise InvalidRunRequest(f"{scenario} / seed {seed} / {role} isn't a recorded demo path")
         # No-op in replay; in live mode: owner token, then the daily cap.
         await check_live_start(self.settings, self.store, live_token)
         run_id = str(uuid.uuid4())
+        await self._start(scenario, seed, role, strategy, run_id, trigger="web")
+        return run_id
+
+    # [HARNESS:ORCH] Idempotent alert intake -- a retried webhook is one run.
+    # WHY: monitoring systems retry on timeouts and may deliver twice; an
+    # agent run is expensive and can request destructive actions, so a
+    # duplicate must return the *existing* run instead of starting another.
+    # The claim is atomic in the store (unique index in Mongo), so even two
+    # deliveries racing each other produce exactly one run. If the start
+    # fails after claiming, the key is released so the sender can retry.
+    # INTERVIEW: "What about duplicate alerts?" -> idempotency key (the
+    # alert id), claimed atomically before any work; duplicates get 200 +
+    # the original run id instead of 202 + a new run.
+    async def start_from_alert(
+        self, alert: AlertPayload, scenario: str, seed: int = 42
+    ) -> tuple[str, bool]:
+        """Start (or find) the run for one alert. Returns (run_id, duplicate)."""
+        if self.replay and (scenario, seed, "system") not in self.recorded_paths():
+            raise InvalidRunRequest(f"{scenario} has no recorded path for webhook (system) runs")
+        # The signature already proved ownership; the daily cap still applies.
+        await check_live_start(self.settings, self.store, "", owner_verified=True)
+        run_id = str(uuid.uuid4())
+        key = f"alert:{alert.alert_id}"
+        existing = await self.store.claim_idempotency_key(key, run_id)
+        if existing is not None:
+            return existing, True
+        try:
+            await self._start(
+                scenario,
+                seed,
+                "system",
+                "graph",
+                run_id,
+                trigger="webhook",
+                alert=alert.model_dump(),
+            )
+        except Exception:
+            await self.store.release_idempotency_key(key)
+            raise
+        return run_id, False
+
+    async def _start(
+        self,
+        scenario: str,
+        seed: int,
+        role: Role,
+        strategy: Literal["raw", "graph"],
+        run_id: str,
+        *,
+        trigger: str,
+        alert: dict[str, Any] | None = None,
+    ) -> None:
         cassette = (
             None
             if self.settings.opspilot_model_mode == "live"
@@ -115,11 +173,12 @@ class WebRunService:
                 cassette=cassette,
                 sandbox_dir=self.runs_root / run_id,
                 run_id=run_id,
+                trigger=trigger,
+                alert=alert,
             )
         except KeyError as exc:
             raise InvalidRunRequest(str(exc)) from exc
         self._spawn(self._guarded(handle.run.run_id, self._execute(handle)))
-        return run_id
 
     # [HARNESS:HITL] The web half of the approval loop -- a button instead of
     # the CLI's y/n prompt, resumed from durable state by a fresh task.

@@ -22,8 +22,28 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY
 
 ```bash
 uv run opspilot --help
-uv run opspilot run --scenario checkout_pool_exhaustion --seed 42
+uv run opspilot run --scenario checkout_pool_exhaustion --seed 42   # replay by default: $0, no key
+uv run opspilot web                                                   # UI at http://127.0.0.1:8000
 ```
+
+## Loops
+
+An agent system is loops inside loops. OpsPilot has one of each kind:
+
+| Loop | What drives it | Where |
+|---|---|---|
+| **Goal-driven** (inner) | The model: think → act → observe until it submits a report or escalates. Bounded by a step cap, token budget, stuck detection and a required terminal tool. | `opspilot/loops/react_raw.py`, `opspilot/loops/graph.py` |
+| **Event** | Something happens in the world: a monitoring system POSTs a signed alert to `/webhooks/alert` (HMAC over timestamp+body, 5-minute window, idempotent on `alert_id`). The run starts as the `system` role, so destructive actions still wait for a human. | `opspilot/web/webhooks.py`, `opspilot/web/app.py` |
+| **Time-based** | A schedule, not an event: the weekly cron in `.github/workflows/canary.yml`. | GitHub Actions |
+| **Heartbeat** | The canary that cron runs: a synthetic `false_alarm` alert against the *deployed* app, asserting `completed` / `no_incident`. An online eval of the real path (secrets, DB, routing, the agent), $0 against the replay deployment. | `scripts/canary.py` |
+
+**Where a Ralph-style loop would fit (explained, not built).** "Ralph" is the brute-force outer
+loop: run the agent (or a coding agent) again and again until an external check passes —
+`while not evals_pass: try_again()`. Here it would wrap a *change*, not a run: propose a prompt or
+tool edit → `opspilot eval --suite golden --mode live` → keep it if pass^k and cost beat the
+baseline (`opspilot eval compare`), otherwise retry with the failures as feedback. The pieces exist
+(evals, gates, compare); what it would add is cost — every iteration is a live eval — and the risk
+of overfitting the golden set, which is why it stays a sketch here.
 
 ## Development
 

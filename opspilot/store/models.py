@@ -30,6 +30,10 @@ class RunDoc(BaseModel):
     # The submit_report / escalate payload. Kept here because the trace
     # redacts large tool args (observability/tracer.py: redact_if_large).
     report: dict[str, Any] | None = None
+    # How the run started ("cli", "web", "webhook", "eval") and, for webhook
+    # runs, the alert as received -- the audit trail of *why* it ran.
+    trigger: str | None = None
+    alert: dict[str, Any] | None = None
     steps: int | None = None
     tokens: dict[str, int] = Field(default_factory=dict)
     cost_usd: float | None = None

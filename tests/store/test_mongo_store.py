@@ -191,3 +191,11 @@ async def test_mongo_count_runs_since_filters_mode_and_time(store: MongoStore) -
     await store.insert_run(run("new-replay", now, "replay"))
 
     assert await store.count_runs_since(now - timedelta(hours=1), "live") == 1
+
+
+async def test_mongo_idempotency_claim_and_release(store: MongoStore) -> None:
+    await store.ensure_indexes()  # the unique index is what makes the claim atomic
+    assert await store.claim_idempotency_key("k", "run-1") is None
+    assert await store.claim_idempotency_key("k", "run-2") == "run-1"
+    await store.release_idempotency_key("k")
+    assert await store.claim_idempotency_key("k", "run-3") is None

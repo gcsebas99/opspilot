@@ -15,6 +15,7 @@ class MemoryStore:
         self._audit: list[AuditDoc] = []
         self._approvals: dict[str, ApprovalDoc] = {}
         self._eval_runs: dict[str, EvalTrialDoc] = {}
+        self._idempotency: dict[str, str] = {}
 
     async def ensure_indexes(self) -> None:
         pass  # nothing to index on plain dicts/lists
@@ -77,6 +78,17 @@ class MemoryStore:
             return False
         self._approvals[approval_id] = existing.model_copy(update=updates)
         return True
+
+    async def claim_idempotency_key(self, key: str, run_id: str) -> str | None:
+        # Atomic on one event loop: no await between the check and the write.
+        existing = self._idempotency.get(key)
+        if existing is not None:
+            return existing
+        self._idempotency[key] = run_id
+        return None
+
+    async def release_idempotency_key(self, key: str) -> None:
+        self._idempotency.pop(key, None)
 
     async def list_pending_approvals(self) -> list[ApprovalDoc]:
         return [a for a in self._approvals.values() if a.status == "pending"]

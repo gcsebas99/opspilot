@@ -89,6 +89,8 @@ async def create_run(
     cassette: Path | None,
     sandbox_dir: Path,
     run_id: str | None = None,
+    trigger: str | None = None,
+    alert: dict[str, Any] | None = None,
 ) -> RunHandle:
     """Materialize the sandbox and persist the RunDoc. Raises KeyError for
     an unknown scenario -- the caller decides how to present that."""
@@ -120,6 +122,8 @@ async def create_run(
         mode=mode,
         cassette=str(cassette) if cassette is not None else None,
         sandbox_dir=str(sandbox.root),
+        trigger=trigger,
+        alert=alert,
     )
     await store.insert_run(run)
     return RunHandle(

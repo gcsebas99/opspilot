@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     opspilot_daily_run_cap: int = Field(default=20, alias="OPSPILOT_DAILY_RUN_CAP")
     # Per-run token budget for web live runs -- lower than the CLI default.
     opspilot_live_token_budget: int = Field(default=30_000, alias="OPSPILOT_LIVE_TOKEN_BUDGET")
+    # Shared secret for POST /webhooks/alert (HMAC). Empty = endpoint disabled.
+    opspilot_webhook_secret: str = Field(default="", alias="OPSPILOT_WEBHOOK_SECRET")
 
 
 @lru_cache

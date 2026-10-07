@@ -85,7 +85,7 @@ def recorded_demo_paths(root: Path = DEMO_CASSETTE_ROOT) -> list[DemoPath]:
         match = _DEMO_NAME.match(file.stem)
         if match is None or match["scenario"] not in SCENARIOS:
             continue
-        if match["role"] not in ("viewer", "operator", "admin"):
+        if match["role"] not in ("viewer", "operator", "admin", "system"):
             continue
         paths.append(
             DemoPath(

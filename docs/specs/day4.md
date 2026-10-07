@@ -57,7 +57,7 @@ completes; trace visible.
 
 - **Event/hook:** `POST /webhooks/alert` — verifies **HMAC signature** (`X-Signature`, shared secret),
   **idempotency key** (same alert twice ⇒ one run), maps alert → scenario, runs as `system` role.
-- **Cron/heartbeat:** `.github/workflows/canary.yml` scheduled daily: sends a signed `false_alarm`
+- **Cron/heartbeat:** `.github/workflows/canary.yml` scheduled **weekly** (decided 2026-10-05: a demo showcase, not a 24/7 service): sends a signed `false_alarm`
   alert to the deployed webhook and asserts the run ends `completed` with `no_incident` — a production
   canary that doubles as an online eval. Runs against the **replay** deployment, so it verifies the whole
   path (signature, idempotency, run, outcome) for $0.

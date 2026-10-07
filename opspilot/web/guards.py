@@ -85,13 +85,18 @@ def live_run_settings(settings: Settings) -> Settings:
 # INTERVIEW: "What protects your API bill on a public demo?" -> no usable
 # key in replay deployments; live mode is owner-token-gated, daily-capped,
 # per-run-budgeted, and rate-limited.
-async def check_live_start(settings: Settings, store: Store, token: str) -> None:
-    """Gate one live run start: owner token, then the daily cap."""
+async def check_live_start(
+    settings: Settings, store: Store, token: str, *, owner_verified: bool = False
+) -> None:
+    """Gate one live run start: owner token (unless the caller already proved
+    ownership another way, e.g. a valid webhook signature), then the daily cap."""
     if settings.opspilot_model_mode == "replay":
         return
     # compare_digest: constant-time, so response timing can't leak how many
     # leading characters of a guess were right.
-    if not hmac.compare_digest(token.encode(), settings.opspilot_live_token.encode()):
+    if not owner_verified and not hmac.compare_digest(
+        token.encode(), settings.opspilot_live_token.encode()
+    ):
         raise GuardRejected("Live runs are owner-only on this server.", 403)
     midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     started_today = await store.count_runs_since(midnight, settings.opspilot_model_mode)
