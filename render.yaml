@@ -1,0 +1,29 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec): Dashboard ->
+# New -> Blueprint -> pick this repo. One free Docker web service, replay
+# mode, Mongo Atlas for persistence. No ANTHROPIC_API_KEY on purpose: the
+# public demo replays recorded model responses and spends $0.
+services:
+  - type: web
+    name: opspilot
+    runtime: docker
+    plan: free
+    region: oregon  # match the Atlas cluster's region (AWS us-west-2)
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    # Deploy a commit only after CI (tests + replay eval gates) passes.
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: OPSPILOT_MODEL_MODE
+        value: replay
+      - key: OPSPILOT_DEMO_LIVE
+        value: "false"
+      - key: OPSPILOT_MODEL  # must match the model the demo cassettes were recorded with
+        value: claude-haiku-4-5
+      - key: OPSPILOT_STORE
+        value: mongo
+      - key: MONGODB_URI  # Atlas connection string -- prompted once, never committed
+        sync: false
+      - key: OPSPILOT_WEBHOOK_SECRET  # Render generates it; copy it to GitHub for the canary
+        generateValue: true
+      - key: OPSPILOT_RATE_LIMIT_PER_MIN
+        value: "10"

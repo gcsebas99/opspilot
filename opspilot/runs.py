@@ -152,15 +152,47 @@ async def open_run(store: Store, settings: Settings, run_id: str) -> RunHandle:
     # Point at the run's *existing*, already-mutated sandbox -- build_sandbox()
     # would regenerate the scenario and wipe whatever the run already did.
     # Runs from before sandbox_dir was stored used the CLI's fixed layout.
-    sandbox_dir = run.sandbox_dir or str(Path("tmp/runs") / f"{run.scenario}-{run.seed}")
+    sandbox_dir = Path(run.sandbox_dir or Path("tmp/runs") / f"{run.scenario}-{run.seed}")
+    if not sandbox_dir.exists():
+        await _rebuild_lost_sandbox(store, run, sandbox_dir)
     return RunHandle(
         run=run,
-        sandbox=Sandbox(root=Path(sandbox_dir)),
+        sandbox=Sandbox(root=sandbox_dir),
         registry=build_default_registry(settings),
         tracer=Tracer(store, run_id=run.run_id),
         settings=settings.model_copy(update={"opspilot_model": run.model}),
         alert=get_scenario(run.scenario).alert_text,
     )
+
+
+class SandboxLost(RuntimeError):
+    """A run's sandbox is gone and can't be faithfully rebuilt."""
+
+
+# [HARNESS:ENV] Rebuild a lost sandbox -- but only when that's provably safe.
+# WHY: on hosts with an ephemeral disk (Render free: wiped on every restart
+# and spin-down), a run paused for approval keeps its *conversation* in the
+# Mongo checkpointer but loses its sandbox files. Scenarios are seeded and
+# deterministic, so regenerating gives the exact starting state -- which IS
+# the current state as long as nothing destructive has run yet (reads don't
+# mutate; destructive actions are precisely what waits for approval). If
+# one already ran, a rebuild would silently resume on the wrong world, so
+# refuse loudly instead. The audit log is the evidence either way.
+# INTERVIEW: "What if the server restarts while a run awaits approval?" ->
+# checkpointer holds the conversation; the environment is reproducible from
+# (scenario, seed) plus the audit trail of what changed it.
+async def _rebuild_lost_sandbox(store: Store, run: RunDoc, sandbox_dir: Path) -> None:
+    executed = [
+        e.target
+        for e in await store.list_audit(run.run_id)
+        if e.action == "destructive_tool_executed"
+    ]
+    if executed:
+        raise SandboxLost(
+            f"run {run.run_id}'s sandbox was lost after it already ran {', '.join(executed)}; "
+            "regenerating would resume on the wrong state"
+        )
+    build_sandbox(get_scenario(run.scenario), run.seed, sandbox_dir)
 
 
 async def start_graph(

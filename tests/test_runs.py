@@ -180,3 +180,52 @@ async def test_two_concurrent_resumes_only_one_wins(tmp_path: Path) -> None:
         e for e in await store.list_audit(handle.run.run_id) if e.action == "approval_decision"
     ]
     assert [e.actor for e in decisions] == ["alice"]
+
+
+async def test_lost_sandbox_is_rebuilt_when_nothing_destructive_ran(tmp_path: Path) -> None:
+    """Render free wipes the disk on every spin-down. A run paused before its
+    first destructive action can be resumed on a regenerated sandbox."""
+    import shutil
+
+    store = MemoryStore()
+    checkpointer = InMemorySaver()
+    handle = await _operator_run(tmp_path, store)
+    assert (await start_graph(handle, store, checkpointer)).outcome == "awaiting_approval"
+
+    shutil.rmtree(handle.sandbox.root)  # the host restarted while we waited
+    reopened = await open_run(store, _SETTINGS, handle.run.run_id)
+    done = await resume_graph(
+        reopened, store, checkpointer, {"decision": "approve", "approver": "test"}
+    )
+
+    assert done.outcome == "completed"
+    assert reopened.sandbox.facts()["checkout.config_version"] == 12
+
+
+async def test_lost_sandbox_after_a_destructive_action_refuses_to_rebuild(
+    tmp_path: Path,
+) -> None:
+    import shutil
+    from datetime import UTC, datetime
+
+    from opspilot.runs import SandboxLost
+    from opspilot.store.models import AuditDoc
+
+    store = MemoryStore()
+    handle = await _operator_run(tmp_path, store)
+    await store.insert_audit(
+        AuditDoc(
+            ts=datetime.now(UTC),
+            actor="operator",
+            action="destructive_tool_executed",
+            target="restart_service",
+            decision="ok",
+            run_id=handle.run.run_id,
+            prompt_version="v",
+            model="m",
+        )
+    )
+    shutil.rmtree(handle.sandbox.root)
+
+    with pytest.raises(SandboxLost, match="already ran restart_service"):
+        await open_run(store, _SETTINGS, handle.run.run_id)

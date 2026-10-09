@@ -7,17 +7,20 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 on 2026-10-19
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        # Exact tag: setup-uv publishes no floating major tags. uv itself is
+        # pinned to the version that produced uv.lock (same as the Dockerfile).
+        uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.9.29"
           enable-cache: true
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install  # reads .python-version (3.12.8)
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
@@ -39,7 +42,7 @@ jobs:
   # the *harness* changed (graders, policy, tools, loop) or a prompt drifted
   # (cassette miss). Live evals are manual only: see eval-live.yml.
   eval-replay:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 on 2026-10-19
     env:
       OPSPILOT_MODEL_MODE: replay
       # Empty on purpose: proves replay never needs the network or a key.
@@ -51,15 +54,18 @@ jobs:
       OPSPILOT_STORE: memory
       COLUMNS: "120"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        # Exact tag: setup-uv publishes no floating major tags. uv itself is
+        # pinned to the version that produced uv.lock (same as the Dockerfile).
+        uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.9.29"
           enable-cache: true
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install  # reads .python-version (3.12.8)
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
@@ -87,8 +93,31 @@ jobs:
 
       - name: Upload eval report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: eval-report-smoke
           path: evals/reports/
           if-no-files-found: warn
+
+  # The image Render deploys must build -- and Render only deploys after CI
+  # passes (render.yaml: autoDeployTrigger: checksPass), so a broken
+  # Dockerfile fails here, not in production.
+  docker-build:
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 on 2026-10-19
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image
+        run: docker build -t opspilot:ci .
+
+      - name: Smoke-test the container (replay, no key, memory store)
+        shell: bash
+        run: |
+          docker run -d --name app -p 10000:10000 -e PORT=10000 \
+            -e OPSPILOT_STORE=memory -e OPSPILOT_MODEL=claude-haiku-4-5 opspilot:ci
+          for i in $(seq 1 60); do
+            curl -sf localhost:10000/healthz && exit 0
+            sleep 1
+          done
+          docker logs app
+          exit 1

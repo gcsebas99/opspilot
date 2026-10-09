@@ -1,0 +1,19 @@
+# Never ship secrets, local state, or build caches into the image.
+.env
+.env.*
+!.env.example
+.git
+.github
+.venv
+tmp/
+evals/reports/
+**/__pycache__
+*.pyc
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.DS_Store
+
+# Not needed at runtime.
+tests/
+docs/

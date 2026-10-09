@@ -13,7 +13,15 @@ from opspilot.loops.graph import ApprovalAlreadyDecided
 from opspilot.models.cassette import CassetteMiss
 from opspilot.models.factory import DEMO_CASSETTE_ROOT, demo_cassette_path, recorded_demo_paths
 from opspilot.policy.permissions import Role, can_decide_approval
-from opspilot.runs import RunHandle, create_run, open_run, resume_graph, run_raw, start_graph
+from opspilot.runs import (
+    RunHandle,
+    SandboxLost,
+    create_run,
+    open_run,
+    resume_graph,
+    run_raw,
+    start_graph,
+)
 from opspilot.store.base import Store
 from opspilot.web.guards import check_live_start
 from opspilot.web.webhooks import AlertPayload
@@ -222,7 +230,10 @@ class WebRunService:
                 raise DecisionError("Edited arguments must be a JSON object.", 400)
             payload["args"] = edited_args
 
-        handle = await open_run(self.store, self.settings, approval.run_id)
+        try:
+            handle = await open_run(self.store, self.settings, approval.run_id)
+        except SandboxLost as exc:
+            raise DecisionError(str(exc), 409) from exc
         self._spawn(self._guarded(handle.run.run_id, self._resume(handle, payload)))
         return handle.run.run_id
 

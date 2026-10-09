@@ -67,8 +67,8 @@ completes; trace visible.
 ## 4.3 Deploy to Render
 
 - `Dockerfile` (slim, uv, non-root user), `render.yaml` blueprint (web service, free plan, env vars:
-  `OPSPILOT_MODEL_MODE=replay`, `OPSPILOT_DEMO_LIVE=false`, `MONGODB_URI`, `OPSPILOT_MODEL`, `WEBHOOK_SECRET`,
-  `DAILY_RUN_CAP`; `ANTHROPIC_API_KEY` left unset unless live mode is deliberately enabled).
+  `OPSPILOT_MODEL_MODE=replay`, `OPSPILOT_DEMO_LIVE=false`, `MONGODB_URI`, `OPSPILOT_MODEL`,
+  `OPSPILOT_WEBHOOK_SECRET` (Render-generated), `OPSPILOT_DAILY_RUN_CAP` (live mode only); `ANTHROPIC_API_KEY` left unset unless live mode is deliberately enabled).
 - Record the demo cassettes (see "Demo mode") before deploying — the only paid step of Day 4's demo.
 - Atlas: free cluster, DB user, network access (Render free has no static IPs → allowlist 0.0.0.0/0,
   mitigated by strong credentials — **write this tradeoff in the README**).
