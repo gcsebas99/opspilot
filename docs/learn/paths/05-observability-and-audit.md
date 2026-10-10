@@ -39,15 +39,16 @@ run            react_graph            22ms
   tool_call      query_metrics         0ms   [ok=True 675 chars]
   ...
   model_call     model.create          1ms   [in=6739 out=98]
-approval_wait  rollback_config        36ms
-policy_check   policy                 0ms   [allowed]
-tool_call      rollback_config        1ms   [ok=True 34 chars]
-...
-tool_call      submit_report          0ms   [ok=True 16 chars]
+run            react_graph.resume     11ms
+  approval_wait  rollback_config      34ms
+  policy_check   policy                0ms   [allowed]
+  tool_call      rollback_config       1ms   [ok=True 34 chars]
+  ...
+  tool_call      submit_report         0ms   [ok=True 16 chars]
 ```
 
-(Replayed model calls take about 1ms; live ones take seconds. Note that everything after
-`approval_wait` sits at the top level — see the gap in section 2.)
+(Replayed model calls take about 1ms; live ones take seconds. The run paused for approval, so it
+has two `run` spans — see section 2.)
 
 And its audit log, a hash chain:
 
@@ -88,9 +89,12 @@ on the run record instead of read back from the trace.
   sequence, the rebuilt timeline is exact. Tracing became a second consumer of the events, with
   no change to the loop.
 
-A gap you can see in the output above: when a run **resumes after an approval**, the resumed
-part isn't inside the original `run` span — that span closed when the run paused, possibly in
-another process. The resumed spans are recorded, just not nested.
+A paused run has **two `run` spans**. The first closes when the run pauses for approval —
+possibly in a process that then exits — so the resume opens its own, `react_graph.resume`
+(`opspilot/loops/graph.py::resume_react_graph`). Everything after the approval nests under it.
+(`approval_wait` can be longer than its parent: it's measured from when approval was *requested*,
+before the resume began.) This was a real gap, found while writing this guide, and fixed with a
+test: `tests/test_runs.py::test_resumed_run_spans_nest_under_their_own_run_span`.
 
 ### 3. Metrics: aggregate many runs
 
