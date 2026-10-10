@@ -104,7 +104,9 @@ def check(root: Path = ROOT) -> tuple[list[Problem], list[tuple[str, int, str]]]
                     external.append((rel, number, target))
                 elif (message := check_link(doc, target, root)) is not None:
                     problems.append(Problem(rel, number, message))
-            for path_text, symbol in CODE_REF_RE.findall(line):
+            # A link's text (e.g. [`AGENTS.md`](../x/AGENTS.md)) is already
+            # verified by its target -- only bare backticked references count.
+            for path_text, symbol in CODE_REF_RE.findall(LINK_RE.sub("", line)):
                 if (message := check_code_ref(path_text, symbol or None, root)) is not None:
                     problems.append(Problem(rel, number, message))
     return problems, external

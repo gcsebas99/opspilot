@@ -51,3 +51,8 @@ def test_fenced_code_blocks_are_ignored_and_external_links_collected(tmp_path: P
 
 def test_real_repo_docs_are_clean() -> None:
     assert main([]) == 0
+
+
+def test_backticked_link_text_is_not_a_second_reference(tmp_path: Path) -> None:
+    doc = "The prompt is [`AGENTS.md`](../../opspilot/runs.py), not a root file.\n"
+    assert _messages(_repo(tmp_path, doc)) == []
