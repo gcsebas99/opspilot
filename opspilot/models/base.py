@@ -37,16 +37,10 @@ class ModelResponse(BaseModel):
 class ModelClient(Protocol):
     """Every model backend implements this.
 
-    [HARNESS:ORCH] One normalized response shape across three backends.
-    WHY: the loop (1.6) only ever talks to this Protocol -- it doesn't know
-    or care whether it's driving a live Anthropic call, a hand-scripted
-    sequence for a deterministic unit test, or (Day 3) a recorded replay.
-    Swapping backends is a constructor change at the call site, never a
-    change to the loop itself.
-    INTERVIEW: "How do you test an agent loop without hitting the real
-    API?" -> the loop depends on this Protocol, not a concrete client;
-    tests inject ScriptedModel, which returns a scripted list of
-    ModelResponse and drives every exit condition deterministically.
+    [HARNESS:ORCH] One normalized response shape across every model backend.
+    WHY: the loop depends on this Protocol, not a client, so live API, scripted
+    tests and recorded replays are interchangeable -- swapping backends is a
+    constructor change, never a change to the loop.
 
     `tool_choice` is optional and only the LLM judge (evals/graders/judge.py)
     sets it, to force a structured answer; the agent loops never do.

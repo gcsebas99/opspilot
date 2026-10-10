@@ -118,13 +118,9 @@ class ModelClientChatModel(BaseChatModel):
     """A LangChain chat model backed by any opspilot ModelClient.
 
     [HARNESS:ORCH] One seam for record/replay across both loop strategies.
-    WHY: the graph speaks LangChain (BaseMessage in, AIMessage out); the raw
-    loop speaks our ModelClient Protocol. Adapting LangChain -> ModelClient
-    means RecordingModel/ReplayModel exist once, cassettes have one format,
-    and the graph can be replayed without touching its nodes. Tradeoff: in
-    record/replay the graph skips ChatAnthropic's own conversion code.
-    INTERVIEW: "How do you replay a LangGraph agent?" -> plug in at the
-    chat-model level: a BaseChatModel whose _agenerate calls a recorded client.
+    WHY: adapting LangChain -> ModelClient means one recording/replay implementation
+    and one cassette format, with no change to the graph's nodes. Tradeoff: in
+    record/replay the graph skips ChatAnthropic's own message conversion.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

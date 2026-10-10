@@ -9,13 +9,9 @@ def _within(name: str, actual: float | None, limit: float) -> Check:
     return Check(name=name, passed=actual <= limit, detail=f"{actual:g} / {limit:g}")
 
 
-# [HARNESS:EVAL] Budget grading -- a correct answer that cost too much fails.
-# WHY: in production, cost and latency are requirements, not nice-to-haves;
-# a prompt change that fixes one case but doubles tokens should show up as
-# a failure here, not be discovered on the invoice. Tokens count cache reads
-# and writes too, matching the loop's own token budget.
-# INTERVIEW: "+5% accuracy for +40% cost -- ship it?" -> make cost a graded,
-# per-case budget so the tradeoff is explicit in the eval report.
+# [HARNESS:EVAL] Budget grading: a correct answer that cost too much fails.
+# WHY: cost and latency are requirements; a change that doubles tokens should
+# fail here, not surface on the invoice. Cache tokens count, like the loop budget.
 def grade_budget(case: EvalCase, trial: EvalTrialDoc) -> Grade:
     budgets = case.budgets
     tokens = sum(trial.tokens.values()) if trial.tokens else None

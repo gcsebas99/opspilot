@@ -227,13 +227,9 @@ def create_app(
         )
 
     # [HARNESS:LOOP] Event-driven outer loop: an alert starts the agent.
-    # WHY: the inner ReAct loop is goal-driven (investigate until a report);
-    # this is the loop *around* it -- something in the world happens and
-    # the agent wakes up, with no human clicking "start". It runs as the
-    # `system` role, so destructive actions still wait for a human approval.
-    # INTERVIEW: "Inner vs outer loops?" -> inner: think/act/observe until
-    # done; outer: what *starts* runs -- events (this webhook), time (cron),
-    # heartbeats (the canary) -- and what retries them.
+    # WHY: the inner loop decides *how* to work; outer loops decide *when* a run
+    # starts (events here, schedules and heartbeats in the canary). Runs as the
+    # `system` role, so destructive actions still wait for a human.
     @app.post("/webhooks/alert")
     async def alert_webhook(request: Request) -> JSONResponse:
         service = _service(request)

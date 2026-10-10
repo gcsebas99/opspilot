@@ -57,13 +57,10 @@ def _normalize_value(value: Any, ids: dict[str, str]) -> Any:
     return value
 
 
-# [HARNESS:EVAL] Request normalization -- strip volatile fields before hashing.
-# WHY: the cassette key must change when the *prompt* changes and never when
-# only noise changes (tool_use ids are random per API call, run ids are
-# UUIDs, restart timestamps are wall-clock). Miss this and every replay is a
-# spurious cache miss; over-normalize and real prompt changes slip through.
-# INTERVIEW: "How do you key recorded LLM responses?" -> hash of the
-# canonical (model, system, messages, tools) after masking volatile fields.
+# [HARNESS:EVAL] Request normalization: mask volatile fields before hashing.
+# WHY: the key must change when the *prompt* changes, never for noise (random
+# tool_use ids, UUIDs, wall-clock restart times). Too little masking -> spurious
+# misses; too much -> real prompt changes slip through.
 def normalize_request(
     model: str,
     system: list[dict[str, Any]] | str,

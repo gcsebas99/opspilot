@@ -28,14 +28,15 @@ Mark every place where a harness concept is *actually implemented* with a tagged
 
 ```python
 # [HARNESS:LOOP] Exit condition #2 — hard step cap.
-# WHY: a confused model can loop forever and burn tokens.
-# INTERVIEW: "How do you stop runaway agents?" → step cap, token budget,
-#            stuck detection (same tool+args repeated), explicit final_answer tool.
+# WHY: a confused model can loop forever and burn tokens; the cap is the
+# cheapest backstop, checked before each model call.
 ```
 
 Rules:
-- Format: first line `# [HARNESS:<TAG>] <what this is>`, then `# WHY:` (required),
-  then `# INTERVIEW:` (optional: likely question → short answer). Max ~6 lines.
+- Format: first line `# [HARNESS:<TAG>] <what this is>`, then `# WHY:` (required).
+  **3–5 lines total** — longer explanations belong in `docs/learn/`, not in the code.
+- Write for a learner reading the code: plain explanation, no Q&A or "likely question →
+  answer" notes. (Questions to test yourself live in the `docs/learn/` paths.)
 - Allowed tags: `LOOP`, `TOOLS`, `CONTEXT`, `ENV`, `MEMORY`, `OBS`, `EVAL`, `GUARD`,
   `HITL`, `PERM`, `AUDIT`, `ORCH` (orchestration / error handling / retries).
 - Only on concept-bearing code. No tags on boilerplate, getters, imports.
@@ -85,4 +86,4 @@ Rules:
 
 Tests pass, lint/type checks pass, HARNESS tags present where concepts live,
 and a 3–5 line "what you should understand now" note printed at the end of the step
-so Sebas can put it into `LEARNING.md` in his own words.
+so Sebas can restate it in his own words.

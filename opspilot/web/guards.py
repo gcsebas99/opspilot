@@ -75,16 +75,10 @@ def live_run_settings(settings: Settings) -> Settings:
     return settings.model_copy(update={"opspilot_token_budget": budget})
 
 
-# [HARNESS:GUARD] Spend guards for the public web app.
-# WHY: a public URL plus an API key is an open tab on your bill. Layers,
-# cheapest first: replay by default (no key needed at all); a deliberate
-# OPSPILOT_DEMO_LIVE switch checked at startup; an owner token compared in
-# constant time; a global daily cap counted in the store (survives
-# restarts, shared across instances); a per-run token budget the loop
-# itself enforces; and a per-IP rate limit on top of all of it.
-# INTERVIEW: "What protects your API bill on a public demo?" -> no usable
-# key in replay deployments; live mode is owner-token-gated, daily-capped,
-# per-run-budgeted, and rate-limited.
+# [HARNESS:GUARD] Spend guards for the public web app, cheapest layer first.
+# WHY: a public URL plus an API key is an open tab on the bill. Replay needs no
+# key; live needs a startup switch, an owner token, a daily cap kept in the store,
+# a per-run token budget, and a per-IP rate limit on top.
 async def check_live_start(
     settings: Settings, store: Store, token: str, *, owner_verified: bool = False
 ) -> None:

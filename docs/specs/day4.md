@@ -77,13 +77,55 @@ completes; trace visible.
 
 **Accept:** public URL works end-to-end; canary workflow passes against it.
 
-## 4.4 README + concept index
+## 4.4 Learning guide + README + concept index (expanded 2026-10-10)
 
-- README: pitch (3 lines), architecture mermaid (from PLAN.md), **concept → file map table**,
-  screenshots/GIF of the approval flow, eval results table + ablation highlights, how to run locally,
-  tradeoffs & what I'd do next.
-- `scripts/concepts.py`: greps `[HARNESS:*]` tags → generates `CONCEPTS.md` grouped by pillar with
-  file:line links. Run it in CI and fail if it's stale.
+The project has two jobs: teach harness engineering to its author, and demonstrate it to others.
+So 4.4 is a **guided, learn-oriented documentation set**, not just a README.
+Plain Markdown + Mermaid in the repo (GitHub renders both natively — no docs dependency, no build).
+
+**Shape** — `docs/learn/`:
+- `README.md` — how to use the guide, suggested reading order, map of paths.
+- `00-big-picture.md` — what a harness is; the anatomy of one run end-to-end (sequence diagram:
+  alert → context → loop → tools → policy → HITL → report → trace/audit → evals).
+- `glossary.md` — every term in one or two lines, each linking to the path section that explains it.
+- `paths/` — one guided path per concern, ordered like a run flows:
+  1. **Loop** (LOOP) — inner ReAct loop, exit conditions, raw vs graph, outer loops.
+  2. **Tools & environment** (TOOLS, ENV) — tool contracts, risk tags, registry, sandbox, scenarios.
+  3. **Context** (CONTEXT) — prompt assembly, AGENTS.md, runbooks (progressive disclosure),
+     prompt versioning, caching. (Compaction: placeholder until 4.5.)
+  4. **Safety & control** (PERM, GUARD, HITL) — permission matrix, guardrails/injection, approvals.
+  5. **Observability & audit** (OBS, AUDIT) — spans/trace, metrics, tamper-evident audit log.
+  6. **Reliability** (ORCH) — normalized model client, retries, record/replay, idempotency, races.
+  7. **Evals** (EVAL) — dataset, runner, graders (3 layers), judge calibration, pass@k/pass^k,
+     reports, regressions, CI gates.
+  8. **Production** — web app, cost guards, webhook, canary, deploy (Docker/Render/Atlas).
+  9. **Memory** (MEMORY) — short-term (checkpointer) now; long-term placeholder until 4.6.
+
+**Every path follows one template** (consistency is what makes it learnable):
+in one sentence · why it matters (the failure modes it prevents) · key terms · a diagram ·
+walkthrough top→down where each idea points to *where it lives* (file + symbol, not line numbers,
+which rot) · design decisions & the alternative not taken · "see it yourself" ($0 replay commands) ·
+check your understanding (questions with collapsible answers) ·
+further reading (well-known articles, every link verified).
+
+**Keeping it true (docs as code):**
+- `scripts/concepts.py` → `CONCEPTS.md`: the exhaustive `[HARNESS:*]` index, grouped by pillar,
+  file:line links. The paths are the curated route; CONCEPTS.md is the complete map.
+- `scripts/check_docs.py`: every relative link in `docs/` and the README resolves, and every
+  `file::symbol` reference still exists in the code. Both run in CI (fail on stale/broken).
+- Tag audit: tags are uneven today (EVAL 24, TOOLS 1, CONTEXT 3, MEMORY 0); add tags where a
+  concept really lives so the index and the paths agree.
+
+**README rewrite** (the front door, ~1 screen): 3-line pitch, live demo link + replay note,
+architecture Mermaid, "start here" → `docs/learn/`, concept → path table, a screenshot/GIF of the
+approval flow, eval results (from the committed baseline), how to run locally, tradeoffs & next steps.
+
+**Comment pass (first):** every `[HARNESS:*]` block rewritten to 3–5 lines (detail moves to the
+paths), and Q&A-style notes rephrased as plain explanation across code, docs, specs and
+CLAUDE.md. The codebase reads strictly as a learning/demo project.
+
+**Order:** comment pass → concepts.py + check_docs.py + tag audit → big picture + glossary + guide skeleton →
+paths, one or two per step (reviewed as they land) → README last (it summarizes everything).
 
 ## 4.5 Context compaction `[HARNESS:CONTEXT]` (cut 2nd)
 
@@ -114,7 +156,7 @@ Day 3's 3.6 was deferred to here: run all ablations together, with one cost plan
 `docs/ablations.md`. Prerequisite: the human scores in `evals/judge_calibration.yaml` are filled in
 (blind) and `opspilot eval judge-check` reports the judge as trusted.
 
-## Interview questions
+## Questions to test yourself
 
 1. How does your UI resume a paused agent after a human approves? What if the server restarted in between?
 2. How do you secure a webhook that triggers an agent? What about duplicate alerts?

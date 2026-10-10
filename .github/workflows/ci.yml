@@ -37,10 +37,9 @@ jobs:
       - name: Test (pytest)
         run: uv run pytest -q
 
-  # [HARNESS:EVAL] Evals in CI -- replay only, so every push is graded for $0.
-  # The model's answers come from committed cassettes; a red build here means
-  # the *harness* changed (graders, policy, tools, loop) or a prompt drifted
-  # (cassette miss). Live evals are manual only: see eval-live.yml.
+  # [HARNESS:EVAL] Evals in CI: replay only, so every push is graded for $0.
+  # WHY: answers come from committed cassettes, so a red build means the harness
+  # changed or a prompt drifted. Live evals are manual (eval-live.yml).
   eval-replay:
     runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 on 2026-10-19
     env:

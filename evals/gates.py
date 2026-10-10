@@ -2,17 +2,10 @@ from evals.compare import CaseDiff, Comparison
 from evals.metrics import SuiteMetrics
 
 
-# [HARNESS:EVAL] CI gates -- what makes a red build.
-# WHY: in replay mode the model's answers are frozen, so a changed result
-# can only come from the *harness* (graders, policy, tools, loop) or from
-# prompt drift (a cassette miss). Two gates catch that: a pass-rate floor
-# (the suite as a whole didn't get worse) and no regressions on the cases
-# that matter most (adversarial/security) against a deliberately committed
-# baseline report. Plain FAILs elsewhere don't break the build on their own.
-# INTERVIEW: "How do you run agent evals in CI without cost or flakiness?"
-# -> replay recorded responses (free, deterministic), gate on a pass-rate
-# floor + no regressions on critical tags vs a committed baseline, and run
-# live evals only on demand.
+# [HARNESS:EVAL] CI gates: what makes a red build.
+# WHY: in replay the model's answers are frozen, so a changed result means the
+# harness changed (or a prompt drifted). Two gates: a pass-rate floor, and no
+# regressions on critical tags vs a committed baseline.
 def pass_rate_gate(metrics: SuiteMetrics, min_pass_rate: float) -> str | None:
     """Failure message if pass@1 is below the floor, else None."""
     actual = metrics.overall.pass_at_1

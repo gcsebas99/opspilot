@@ -115,16 +115,10 @@ class WebRunService:
         await self._start(scenario, seed, role, strategy, run_id, trigger="web")
         return run_id
 
-    # [HARNESS:ORCH] Idempotent alert intake -- a retried webhook is one run.
-    # WHY: monitoring systems retry on timeouts and may deliver twice; an
-    # agent run is expensive and can request destructive actions, so a
-    # duplicate must return the *existing* run instead of starting another.
-    # The claim is atomic in the store (unique index in Mongo), so even two
-    # deliveries racing each other produce exactly one run. If the start
-    # fails after claiming, the key is released so the sender can retry.
-    # INTERVIEW: "What about duplicate alerts?" -> idempotency key (the
-    # alert id), claimed atomically before any work; duplicates get 200 +
-    # the original run id instead of 202 + a new run.
+    # [HARNESS:ORCH] Idempotent alert intake: a redelivered alert is one run.
+    # WHY: monitors retry, and a run is expensive and can act destructively. The
+    # alert_id is claimed atomically before any work (duplicates get the original
+    # run), and released if the start fails so the sender can retry.
     async def start_from_alert(
         self, alert: AlertPayload, scenario: str, seed: int = 42
     ) -> tuple[str, bool]:
@@ -188,15 +182,10 @@ class WebRunService:
             raise InvalidRunRequest(str(exc)) from exc
         self._spawn(self._guarded(handle.run.run_id, self._execute(handle)))
 
-    # [HARNESS:HITL] The web half of the approval loop -- a button instead of
-    # the CLI's y/n prompt, resumed from durable state by a fresh task.
-    # WHY: the run that paused is long gone (its task ended at the
-    # interrupt); open_run() rebuilds it from the RunDoc + checkpointer, so
-    # this works the same after a server restart (with Mongo). Checks run
-    # in order of cheapness: exists -> allowed to decide -> still pending.
-    # The pending check here is for UX (a clean 409 for a late click); the
-    # atomic claim in resume_react_graph is what guarantees exactly-once
-    # when two requests truly race.
+    # [HARNESS:HITL] The web half of the approval loop: a button instead of y/n.
+    # WHY: the paused task is gone, so open_run() rebuilds the run from stored state.
+    # Checks go cheapest first (exists -> allowed -> pending); the atomic claim in
+    # resume_react_graph is what guarantees exactly-once under a real race.
     async def decide(
         self,
         approval_id: str,

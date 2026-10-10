@@ -60,13 +60,9 @@ class AgentState(TypedDict):
     role: Role
     run_id: str
     alert: str
-    # [HARNESS:GUARD] Services a *successful read tool call* has actually
-    # touched this run -- see react_raw.py's identical field for the WHY
-    # (only reads that succeeded, never a blocked/denied destructive
-    # attempt, grow this). A step lag behind the raw loop: the policy node
-    # runs entirely before the tools node, so within one step a fresh read
-    # can't unlock a destructive call in the *same* parallel batch the way
-    # it can there -- an accepted coarser granularity, not a bug.
+    # [HARNESS:GUARD] Services a *successful read* touched this run (scope evidence).
+    # WHY: same rule as react_raw.py, one step coarser: the policy node runs before
+    # the tools node, so a read can't unlock a destructive call in the same batch.
     known_services: list[str]
     last_tool_signature: tuple[str, str] | None
     repeat_count: int
@@ -92,16 +88,10 @@ def build_checkpointer(
 ) -> tuple[BaseCheckpointSaver[Any], MongoClient[Any] | None]:
     """InMemorySaver by default; MongoDBSaver when OPSPILOT_STORE=mongo.
 
-    [HARNESS:OBS] No async MongoDB checkpointer exists in the currently
-    installed langgraph-checkpoint-mongodb (AsyncMongoDBSaver was removed
-    going into LangGraph 1.0 -- confirmed by trying the import, not assumed
-    from docs). MongoDBSaver needs a *sync* pymongo.MongoClient, separate
-    from this project's own async MongoStore (2.1) -- two different
-    concerns (LangGraph's internal thread/state persistence vs. our own
-    runs/spans/audit/approvals). Verified empirically that `await
-    graph.ainvoke(...)` works fine with this sync checkpointer -- LangGraph
-    bridges sync checkpointer methods through a thread executor.
-    The returned client (if any) is the caller's to close.
+    [HARNESS:OBS] Checkpointer: in-memory, or MongoDBSaver when OPSPILOT_STORE=mongo.
+    WHY: only Mongo lets another process resume a paused run. LangGraph 1.x has no
+    async Mongo checkpointer, so this takes a sync client (run in a thread executor),
+    separate from our async MongoStore. The caller closes the returned client.
     """
     if settings.opspilot_store == "mongo":
         client: MongoClient[Any] = MongoClient(settings.mongodb_uri)
@@ -150,13 +140,9 @@ def _make_agent_node(model: LanguageModelLike, tracer: Tracer) -> Any:
 
 def _make_route_after_agent(max_steps: int, token_budget: int) -> Any:
     def route_after_agent(state: AgentState) -> str:
-        # [HARNESS:LOOP] Checked first, unconditionally -- same guarantee as
-        # Day 1's "check before every model call": max_steps and the token
-        # budget always win, regardless of whether this turn had a tool
-        # call, a plain-text reply, or anything else. Without this, a
-        # plain-text-only conversation would never visit route_after_tools
-        # (the only other place these were checked) and could run past
-        # both limits.
+        # [HARNESS:LOOP] Step cap and token budget are checked first, on every turn.
+        # WHY: a plain-text-only conversation never reaches route_after_tools (the other
+        # check), so without this it could run past both limits.
         if state["step"] >= max_steps:
             return _MARK_MAX_STEPS
         if _cumulative_tokens(state["tokens_used"]) > token_budget:
@@ -188,26 +174,10 @@ async def _nudge_and_retry_node(state: AgentState) -> dict[str, Any]:
 def _make_policy_node(
     registry: ToolRegistry, tracer: Tracer, store: Store, *, model_name: str, prompt_version: str
 ) -> Any:
-    # [HARNESS:HITL] RequireApproval pauses the run for a human, via
-    # interrupt(). WHY THIS SHAPE, VERIFIED EMPIRICALLY (not from docs
-    # alone): a node re-runs from the top on every resume, with each
-    # earlier interrupt() call in this same loop instantly replaying its
-    # cached resume value before reaching the next pending one. That means:
-    # (1) the ApprovalDoc insert must be guarded (check-then-insert) so a
-    # replay never resets an already-decided approval back to "pending",
-    # and (2) nothing here can be wrapped in `async with tracer.span(...)`
-    # around an interrupt() call -- the pausing pass would unwind through
-    # it (writing a bogus "error" span) and the resume pass would write a
-    # second, real one. Instead the policy_check span is written once, at
-    # the very end, which is only reached by the pass that completes
-    # without hitting a *new* interrupt.
-    # INTERVIEW: "How do you pause an agent for human approval and resume
-    # it later, possibly in a different process?" -> LangGraph interrupt()
-    # inside the graph node + a checkpointer (MongoDBSaver, so a different
-    # process can see the paused thread) + Command(resume=...) to continue;
-    # the approval decision itself is recorded in our own store (ApprovalDoc),
-    # not just LangGraph's checkpoint, so it survives independent of
-    # checkpoint retention and is queryable (`opspilot approvals list`).
+    # [HARNESS:HITL] RequireApproval pauses the run here, via interrupt().
+    # WHY: on resume LangGraph re-runs this node from the top, replaying earlier
+    # interrupts. So the ApprovalDoc insert is check-then-insert, and the span and
+    # audit writes happen once at the end -- never around an interrupt() call.
     async def policy_node(state: AgentState) -> dict[str, Any]:
         last = state["messages"][-1]
         if not isinstance(last, AIMessage):
@@ -219,14 +189,9 @@ def _make_policy_node(
         node_start = datetime.now(UTC)
         decisions: dict[str, str | None] = {}
         edited_args: dict[str, dict[str, Any]] = {}
-        # [HARNESS:AUDIT] Collected, not written immediately -- see this
-        # node's [HARNESS:HITL] WHY above. A Deny in the same batch as a
-        # RequireApproval would otherwise get audited twice: once on the
-        # pausing pass (which never reaches the return below, so in
-        # practice it wouldn't -- but relying on that is fragile) and once
-        # on the resume pass replaying this same call from scratch. Flushed
-        # only where the policy_check span already is: reached exactly
-        # once, by the pass that completes without hitting a new interrupt.
+        # [HARNESS:AUDIT] Denials are collected here and flushed once, at the end.
+        # WHY: this node is replayed on resume (see the interrupt note above); writing
+        # immediately could audit the same denial twice.
         denial_audit: list[tuple[str, str]] = []
 
         for tool_call in last.tool_calls:
@@ -373,11 +338,8 @@ def _make_tools_node(
                 if not result.ok:
                     handle.status = "error"
 
-                # [HARNESS:GUARD] Detection is a signal only -- see
-                # guardrails.detect_prompt_injection's WHY. Recorded while
-                # still inside the open tool_call span so it nests as a
-                # child of it (react_raw.py's post-hoc reconstruction can't
-                # do that -- its guardrail span is a sibling instead).
+                # [HARNESS:GUARD] Injection detection is a signal, recorded as a guardrail span.
+                # WHY: written inside the open tool_call span so it nests under that call.
                 injection_patterns = detect_prompt_injection(result.content)
                 if injection_patterns:
                     handle.set_attr("injection_patterns", injection_patterns)
@@ -400,13 +362,9 @@ def _make_tools_node(
             ):
                 known_services.append(service)
 
-            # [HARNESS:AUDIT] "Not denied" covers both a plain Allow and an
-            # approved RequireApproval (resume_react_graph clears
-            # policy_decisions[call_id] to None on approve, same as
-            # policy_node does for a plain Allow) -- both are a destructive
-            # action that actually ran, which is what the spec asks to
-            # audit. tools_node is never replayed (unlike policy_node), so
-            # this can write directly with no deferral.
+            # [HARNESS:AUDIT] Audit every destructive action that actually ran.
+            # WHY: "not denied" covers a plain Allow and an approved request alike; this node
+            # is never replayed, so it can write the entry directly.
             if tool is not None and tool.risk == "destructive" and denial_reason is None:
                 await record_audit(
                     store,
@@ -686,14 +644,10 @@ async def resume_react_graph(
     `decision` is {"decision": "approve"|"reject"|"edit", "approver": str,
     "reason": str (for reject), "args": dict (for edit)}.
 
-    [HARNESS:HITL] This function runs OUTSIDE any graph node -- unlike the
-    policy node's own code, it is never replayed, so it's the one safe
-    place to update the ApprovalDoc exactly once and compute the
-    approval_wait span from real elapsed wall-clock time (requested_at to
-    now), which can span a completely separate process launched much later
-    -- the whole point of checkpointing to Mongo instead of memory. Same
-    reasoning makes it the safe place to write the approval_decision audit
-    entry directly, with no replay-deferral needed.
+    [HARNESS:HITL] Resume runs OUTSIDE the graph, so it is never replayed.
+    WHY: that makes it the one safe place to record the decision exactly once
+    (ApprovalDoc, audit entry) and to time the human's wait (approval_wait span),
+    even when the approval arrives much later, from another process.
     """
     compiled = build_graph(
         model=model,
@@ -720,14 +674,10 @@ async def resume_react_graph(
 
     decided_at = datetime.now(UTC)
     status = "rejected" if decision["decision"] == "reject" else "approved"
-    # [HARNESS:HITL] Exactly-once decision -- claim the approval atomically.
-    # WHY: in a web UI, two decisions can race (double-click, two tabs, two
-    # operators). Both would pass the "is it paused?" check above, and both
-    # would resume the graph: duplicate audit entries, and possibly the
-    # destructive tool running twice. Only the request that flips
-    # pending -> decided may resume; everyone else is told who won.
-    # INTERVIEW: "Two people click approve at once -- what happens?" ->
-    # compare-and-set on the approval's status; the loser gets a 409.
+    # [HARNESS:HITL] Exactly-once decision: claim the approval atomically.
+    # WHY: decisions can race (double-click, two tabs, two operators); without the
+    # claim both would resume and the destructive tool could run twice. Only the
+    # request that flips pending -> decided may resume.
     claimed = await store.claim_approval(
         approval_id,
         {"status": status, "decided_at": decided_at, "approver": decision.get("approver")},

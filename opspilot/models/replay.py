@@ -7,13 +7,10 @@ from opspilot.models.cassette import Cassette, CassetteMiss, normalize_request, 
 class ReplayModel:
     """Serves recorded responses from a cassette; never touches the network.
 
-    [HARNESS:EVAL] Replay mode -- a cache miss fails loudly, never falls back.
-    WHY: a miss means the request changed (prompt, tools, model, or loop
-    logic). Silently calling the live API would make CI cost money and go
-    flaky; returning some "nearest" response would test a conversation that
-    never happened. Failing with the first differing field says what to re-record.
-    INTERVIEW: "What does replay actually test?" -> the harness (loop,
-    tools, policy, graders) deterministically; live runs test model+prompt.
+    [HARNESS:EVAL] Replay mode: a cache miss fails loudly, never falls back.
+    WHY: a miss means the prompt, tools, model or loop changed. Calling the API would
+    make CI cost money and flake; a "nearest" answer would test a conversation that
+    never happened. The error names the first differing field to re-record.
     """
 
     def __init__(self, cassette: Cassette, model: str) -> None:

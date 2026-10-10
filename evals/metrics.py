@@ -55,15 +55,9 @@ def case_verdict(trials: list[EvalTrialDoc]) -> CaseVerdict:
 
 
 # [HARNESS:EVAL] pass@k vs pass^k -- capability vs reliability.
-# WHY: an agent is non-deterministic, so one trial per case measures luck.
-# pass@k = fraction of cases solved in AT LEAST ONE of k trials ("can it do
-# this at all?"); pass^k = fraction solved in ALL k ("can I rely on it?").
-# The gap between them is flakiness. Here n == k per case, so the empirical
-# rates are exact; with n > k samples you'd use the unbiased estimator
-# 1 - C(n-c, k)/C(n, k) (Chen et al., 2021) instead.
-# INTERVIEW: "How do you evaluate a non-deterministic agent?" -> k trials
-# per case; report pass@1, pass@k and pass^k; ship on pass^k for anything
-# that acts on production.
+# WHY: one trial per case measures luck. pass@k: solved in at least one of k
+# trials; pass^k: solved in all k. The gap is flakiness. (n == k here, so these
+# are exact; with n > k use the unbiased estimator from Chen et al., 2021.)
 def rates(by_case: dict[str, list[EvalTrialDoc]]) -> Rates:
     trials = [t for ts in by_case.values() for t in ts]
     if not by_case:
@@ -124,11 +118,8 @@ def compute_metrics(trials: list[EvalTrialDoc], cases: dict[str, EvalCase]) -> S
     judge_averages = [d["average"] for d in judge_details if d.get("average") is not None]
 
     # [HARNESS:EVAL] Only live trials report latency.
-    # WHY: a replayed trial's latency is disk reads, and a record-mode trial
-    # whose calls all hit the cassette is the same -- mixing those in would
-    # make a replay sweep look 100x faster than production. Cost stays: in
-    # replay it's the *recorded* cost of real calls, still a valid budget
-    # signal (the report labels it; actual spend was $0).
+    # WHY: replayed (or cassette-served) calls measure disk reads, not the model.
+    # Cost stays: in replay it's the recorded cost of real calls, labeled as such.
     live = [t.latency_s for t in trials if t.mode == "live" and t.latency_s is not None]
 
     return SuiteMetrics(

@@ -13,12 +13,8 @@ def reported_root_cause(trial: EvalTrialDoc) -> str | None:
 
 
 # [HARNESS:EVAL] Outcome grading with partial credit on the diagnosis.
-# WHY: labels are category:service[:detail]. "config_change:checkout:timeout"
-# for a db_pool_size change found the right service and kind of fault -- a
-# human on call would be pointed at the right place -- so it earns 0.5, not
-# the same 0 as blaming the wrong service. Exact label -> 1.0.
-# INTERVIEW: "Exact match or fuzzy grading?" -> structured partial credit
-# on a label schema; deterministic, explainable, no LLM needed.
+# WHY: labels are category:service[:detail]. Right category and service points a
+# human to the right place, so it earns 0.5; an exact label earns 1.0.
 def grade_outcome(case: EvalCase, trial: EvalTrialDoc) -> Grade:
     expected = case.expect.root_cause
     actual = reported_root_cause(trial)

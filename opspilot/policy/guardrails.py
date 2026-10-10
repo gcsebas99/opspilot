@@ -1,19 +1,10 @@
 import re
 from collections.abc import Collection
 
-# [HARNESS:GUARD] Heuristic prompt-injection detection -- a signal, not a
-# blocker. WHY: no fixed pattern list reliably catches every injection
-# attempt (a novel phrasing slips past), so this can never BE the defense --
-# it exists to make an attempt visible (a guardrail span in the trace) so a
-# human reviewing the run sees exactly what happened and why the agent
-# behaved cautiously. The real defense is layer 3: the permission/approval
-# policy plus the scope check below, neither of which reads the tool output
-# text at all -- they hold even when detection here misses every pattern.
-# INTERVIEW: "How do you defend against prompt injection in tool output?" ->
-# defense in depth: label untrusted content explicitly (frame_tool_output),
-# flag suspicious patterns as a signal (this), and make the actual authority
-# boundary blind to prompt text entirely -- permissions.decide() only ever
-# sees role, tool risk, and which service is targeted.
+# [HARNESS:GUARD] Heuristic prompt-injection detection -- a signal, not a blocker.
+# WHY: no pattern list catches every phrasing, so this only makes attempts visible
+# (a guardrail span). The defense is elsewhere: untrusted-data framing plus a
+# permission/scope policy that never reads tool output text at all.
 _INJECTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [

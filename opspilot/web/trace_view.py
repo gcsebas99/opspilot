@@ -35,12 +35,8 @@ def _detail(span: SpanDoc) -> str:
 
 
 # [HARNESS:OBS] The trace as a waterfall -- the run's anatomy at a glance.
-# WHY: the same spans `opspilot trace` prints, laid out on a shared timeline
-# (parent/child nesting = what caused what, bar offset/width = when and how
-# long). Rendered from the store on every poll, so a run in progress fills
-# in live and a paused run visibly stops at its policy check.
-# INTERVIEW: "How do you debug an agent run?" -> a trace of every model
-# call, policy decision and tool call, nested and timed, not just logs.
+# WHY: nesting shows what caused what; bar position and width show when and how
+# long. Rebuilt on every poll, so a live run fills in and a pause is visible.
 def build_waterfall(spans: list[SpanDoc], now: datetime) -> list[WaterfallRow]:
     if not spans:
         return []

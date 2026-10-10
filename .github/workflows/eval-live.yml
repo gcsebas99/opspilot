@@ -1,10 +1,9 @@
 name: Eval (live)
 
-# [HARNESS:EVAL] Live evals -- manual only, bounded, and never on push.
-# WHY: replay (ci.yml) tests the harness for free; only a live run tests the
-# *model + prompt*. Live runs cost real money, so they are a deliberate act:
-# workflow_dispatch only, choice inputs that cap the size of a run, one run
-# at a time, and a hard timeout.
+# [HARNESS:EVAL] Live evals: manual only, bounded, never on push.
+# WHY: replay tests the harness for free; only live runs test the model + prompt,
+# and they cost money -- so: dispatch only, capped inputs, one run at a time.
+
 # Approx. cost per trial: ~$0.04 agent (haiku-4-5) + ~$0.02 judge (sonnet-5).
 #   smoke (4 cases):       k=1 ~ $0.24   k=3 ~ $0.72
 #   adversarial (3 cases): k=1 ~ $0.18   k=3 ~ $0.54

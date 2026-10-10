@@ -48,14 +48,9 @@ def _wake(
         sleep(poll_s)
 
 
-# [HARNESS:LOOP] Heartbeat outer loop -- the canary as an online eval.
-# WHY: CI's replay evals prove the *code* is right; they can't prove the
-# *deployment* is (secrets set, DB reachable, webhook routed, server awake).
-# A scheduled synthetic alert with a known right answer exercises the real
-# path in production and fails loudly if any link breaks -- an eval that
-# runs against the live system instead of a test fixture.
-# INTERVIEW: "How do you know production still works?" -> a canary: a
-# scheduled synthetic request with a known expected outcome, asserted end to end.
+# [HARNESS:LOOP] Heartbeat outer loop: the canary as an online eval.
+# WHY: replay evals prove the *code*; only a scheduled synthetic alert with a known
+# answer proves the *deployment* (secrets, DB, routing, server awake) end to end.
 def run_canary(
     client: httpx.Client,
     secret: str,

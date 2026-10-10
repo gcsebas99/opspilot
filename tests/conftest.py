@@ -16,13 +16,10 @@ def _refuse(*_args: Any, **_kwargs: Any) -> Any:
     )
 
 
-# [HARNESS:EVAL] Test-suite network guard -- "no real API in unit tests",
-# enforced rather than hoped for.
-# WHY: a default argument (a live judge client) once made runner tests send
-# real requests; they only "passed" because auth failed and the error was
-# recorded as data. Patching the SDK's real transport makes any such leak a
-# loud failure. httpx2.MockTransport (used to test AnthropicModel's retry
-# logic) is a different transport, so those tests are unaffected.
+# [HARNESS:EVAL] Network guard: "no real API in unit tests", enforced.
+# WHY: a default argument once made tests send real (auth-failing) requests that
+# still "passed". Patching the SDK's real transport turns any leak into a loud
+# failure; httpx2.MockTransport (used by retry tests) is unaffected.
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", _refuse)

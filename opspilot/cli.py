@@ -218,12 +218,9 @@ async def _run_async(
         )
         try:
             result = await start_graph(handle, store, checkpointer, max_steps=max_steps)
-            # [HARNESS:HITL] The interactive half of the approval loop: the
-            # graph itself only pauses (outcome="awaiting_approval") and
-            # resumes (resume_graph) -- this is the one place a human
-            # actually decides, via a blocking prompt. `opspilot approve`
-            # and the web UI's approve button (4.1) are the out-of-process
-            # equivalents for an operator picking up a run started elsewhere.
+            # [HARNESS:HITL] The interactive half of the approval loop: a blocking y/n.
+            # WHY: the graph only pauses and resumes; this is where a human decides.
+            # `opspilot approve` and the web UI are the out-of-process equivalents.
             while result.outcome == "awaiting_approval":
                 pending = result.pending_approval
                 assert pending is not None
@@ -385,11 +382,9 @@ def approve(
 
 async def _approve_async(approval_id: str, reject: bool, reason: str, approver: str) -> None:
     settings = get_settings()
-    # [HARNESS:HITL] Cross-process resume needs a checkpointer the paused
-    # `opspilot run` process also wrote to -- InMemorySaver lives only in
-    # that process's memory, so a separate `opspilot approve` invocation can
-    # never see the paused thread there. Only MongoDBSaver persists across
-    # processes, which is why this command refuses to proceed without it.
+    # [HARNESS:HITL] Cross-process resume needs a shared checkpointer.
+    # WHY: InMemorySaver lives in the paused process's memory; only MongoDBSaver
+    # lets a separate `opspilot approve` see the paused thread.
     if settings.opspilot_store != "mongo":
         console.print(
             "[red]opspilot approve requires OPSPILOT_STORE=mongo -- the paused run's "

@@ -5,21 +5,10 @@ from opspilot.observability.pricing import cost_usd
 from opspilot.observability.tracer import Tracer, redact_if_large
 
 
-# [HARNESS:OBS] Reconstructing spans from events instead of instrumenting the
-# loop inline.
-# WHY: Day 1's `on_event` callback is synchronous, and the loop's exit
-# conditions never needed to know tracing exists -- making it async just to
-# write spans inline would be a bigger, more invasive change than this
-# sub-task calls for. Every value needed to reconstruct exact span timing
-# (latency_ms, duration_ms) is already in the event payload, and the loop
-# executes model/tool calls strictly sequentially (never concurrently) -- so
-# a single post-hoc pass, walking the events in order and advancing a clock
-# by each one's own reported duration, reproduces the real timeline exactly,
-# not approximately.
-# INTERVIEW: "How did you add tracing without rewriting the loop?" -> the
-# loop already emitted step_start/model_call/tool_call/exit events for the
-# CLI's live printer; tracing is a second consumer of that same stream,
-# replayed into spans after the run completes rather than written inline.
+# [HARNESS:OBS] Raw-loop spans are rebuilt from its event stream, after the run.
+# WHY: the loop already emits events (for the CLI printer) with each step's own
+# duration, and runs strictly sequentially -- so replaying them advances a clock
+# exactly. Tracing becomes a second consumer, with no change to the loop itself.
 async def record_loop_spans(
     tracer: Tracer, run_start: datetime, events: list[LoopEvent], model: str
 ) -> None:
@@ -63,11 +52,9 @@ async def record_loop_spans(
                 truncated=event.data["truncated"],
                 output_size=event.data["output_size"],
             )
-            # [HARNESS:GUARD] A sibling of the tool_call span (this whole
-            # reconstruction is flat, one level under "run" -- see this
-            # module's WHY above), not nested under it -- the graph
-            # strategy nests it instead, since its spans are written live
-            # inside an open tool_call context. Same signal, two shapes.
+            # [HARNESS:GUARD] Injection signal recorded as a guardrail span.
+            # WHY: here it's a sibling of the tool_call span (this rebuilt trace is flat);
+            # the graph strategy writes it live, nested under the call.
             injection_patterns = event.data.get("injection_patterns") or []
             if injection_patterns:
                 await tracer.record_span(

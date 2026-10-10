@@ -7,12 +7,9 @@ from opspilot.models.cassette import Cassette, normalize_request, request_key
 class RecordingModel:
     """Wraps a real ModelClient and writes every call to a cassette.
 
-    [HARNESS:EVAL] Record mode -- pay for each distinct request once.
-    WHY: a hit is served from the cassette instead of re-calling the API,
-    so re-recording a run with an extra branch (e.g. the reject path after
-    already recording approve) only pays for the new requests.
-    INTERVIEW: "How do you make evals cheap?" -> record real responses
-    once, replay them for free; record mode only pays for cache misses.
+    [HARNESS:EVAL] Record mode: pay for each distinct request once.
+    WHY: hits are served from the cassette, so recording an extra branch (e.g. the
+    reject path after approve) only pays for the requests that are new.
     """
 
     def __init__(self, inner: ModelClient, cassette: Cassette, model: str) -> None:

@@ -22,17 +22,10 @@ def build_system_prompt(
 ) -> str:
     """Plain-text system prompt: AGENTS.md + the runbook index.
 
-    [HARNESS:CONTEXT] Progressive disclosure of skills.
-    WHY: a runbook's full text (diagnostic steps, fix guidance) only earns
-    its place in context once the model has a specific hypothesis. Putting
-    all 4 runbooks in the system prompt up front would burn tokens on 3
-    that never get used in a given incident. Instead only the index (name +
-    one-line description) is always-present; full text loads on demand via
-    the load_runbook tool.
-    INTERVIEW: "What is progressive disclosure and why does it save
-    context?" -> the model sees a menu, not the full manual; it pays the
-    token cost of a runbook's full text only for the one(s) it actually
-    decides to load.
+    [HARNESS:CONTEXT] Progressive disclosure of skills (runbooks).
+    WHY: a runbook's full text only earns its place once the model has a hypothesis.
+    The system prompt carries just the index (name + one line); the full text loads
+    on demand via the load_runbook tool, so unused runbooks cost no tokens.
     """
     index = RUNBOOK_INDEX if runbook_index is None else runbook_index
     agents_md = _read_agents_md(context_dir)
@@ -44,19 +37,10 @@ def build_system_blocks(
 ) -> list[dict[str, Any]]:
     """System prompt wrapped for the API with a prompt-caching breakpoint.
 
-    [HARNESS:CONTEXT] Prompt caching breakpoint.
-    WHY: a Messages API request renders as tools -> system -> messages, so
-    one cache_control marker on the last (and only) system block caches
-    BOTH the tool schemas and the system prompt together -- no separate
-    marker on the tools list is needed. Caching is a prefix match: any byte
-    change anywhere before this marker (a reordered/changed tool set, a
-    non-deterministic system prompt) invalidates the whole cached prefix,
-    which is why build_system_prompt is a pure function of on-disk files --
-    no timestamps, no per-request IDs.
-    INTERVIEW: "What does prompt caching cache here, and what breaks it?"
-    -> everything rendered before the marker (tools + system prompt);
-    a `datetime.now()` or changing tool set anywhere in that prefix breaks
-    it silently -- verify hits via response.usage.cache_read_input_tokens.
+    [HARNESS:CONTEXT] Prompt-caching breakpoint on the last system block.
+    WHY: requests render tools -> system -> messages, so one marker here caches the
+    tool schemas and system prompt together. Caching is a prefix match: any byte
+    change before the marker (timestamps, a reordered tool set) silently breaks it.
     """
     text = build_system_prompt(context_dir, runbook_index)
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]

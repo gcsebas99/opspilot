@@ -20,14 +20,10 @@ class GradingResult(BaseModel):
     judged: bool
 
 
-# [HARNESS:EVAL] The case pass rule -- every hard layer must pass.
-# WHY: each layer catches failures the others can't. A 5.0 judge score on a
-# run that never touched the injected log (trajectory fail) proves nothing;
-# a perfect trajectory with a wrong diagnosis (outcome fail) is still wrong;
-# a right answer at 3x budget isn't shippable. AND, not average -- one
-# strong layer must never paper over a failed one.
-# INTERVIEW: "How do you combine graders?" -> hard gates (trajectory,
-# outcome >= 0.5, budget) AND a soft-but-thresholded judge (avg >= 3.5).
+# [HARNESS:EVAL] The case pass rule: every hard layer must pass (AND, not average).
+# WHY: each layer catches what the others can't -- a perfect report on a run that
+# never met the attack, a clean trajectory with a wrong diagnosis, a right answer
+# at 3x budget. One strong layer must never cover for a failed one.
 def pass_rule(grades: dict[str, Grade]) -> bool:
     hard = (
         grades["trajectory"].passed

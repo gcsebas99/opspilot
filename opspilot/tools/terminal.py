@@ -9,14 +9,10 @@ ROOT_CAUSE_PATTERN = r"^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*){0,2}$"
 
 
 class SubmitReportInput(BaseModel):
-    # [HARNESS:GUARD] Output guardrail -- structure, not content, is what
-    # pydantic can actually enforce. WHY: this can't tell a correct root
-    # cause from a wrong one, but it can reject the shapes that make a
-    # report useless downstream (evals, on-call): a label that doesn't
-    # match any known category:service:detail scheme, or a claim with zero
-    # supporting evidence. A validation failure becomes a normal (ok=False)
-    # tool result -- the model reads it and retries, the same
-    # self-correction path as any other tool's bad-args error.
+    # [HARNESS:GUARD] Output guardrail: enforce the report's *structure*.
+    # WHY: pydantic can't judge a root cause, but it can reject an unknown label shape
+    # or a claim with no evidence. A failure is a normal ok=False result, so the
+    # model reads it and retries.
     root_cause: str = Field(
         pattern=ROOT_CAUSE_PATTERN,
         description=(

@@ -65,18 +65,10 @@ class AnthropicModel:
         self._max_tokens = max_tokens
         self._max_attempts = max_attempts
 
-    # [HARNESS:ORCH] Exponential backoff + jitter on retryable errors only.
-    # WHY: 429/5xx/overloaded are transient server-side conditions -- back
-    # off and retry, with jitter so many concurrent runs don't retry in
-    # lockstep and re-trigger the same rate limit. Everything else (400 bad
-    # request, 401 auth, 404 unknown model) is a bug in our own request, not
-    # a transient condition; retrying it would just waste time and tokens,
-    # so it's excluded from the retry predicate and surfaces immediately.
-    # INTERVIEW: "What do you retry, and what fails fast?" -> RateLimitError
-    # (429), InternalServerError (>=500), and OverloadedError (529 -- a
-    # sibling class, not a subclass of InternalServerError) retry with
-    # backoff+jitter, capped at max_attempts; every other APIError is not
-    # retryable and propagates as-is (reraise=True, no RetryError wrapping).
+    # [HARNESS:ORCH] Exponential backoff + jitter, on retryable errors only.
+    # WHY: 429 / >=500 / 529 overloaded are transient -- retry, with jitter so parallel
+    # runs don't retry in lockstep. 400/401/404 are bugs in our request: retrying only
+    # wastes time, so they surface immediately.
     async def create(
         self,
         system: list[dict[str, Any]] | str,

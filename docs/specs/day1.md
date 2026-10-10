@@ -125,7 +125,7 @@ CLI: `opspilot run --scenario X --seed 42 [--allow-destructive] [--max-steps N]`
 **Accept:** ScriptedModel tests for all 5 exit conditions + parallel tool calls;
 one manual live run solving `checkout_pool_exhaustion`.
 
-## Interview questions you should be able to answer tonight
+## Questions to test yourself
 
 1. Walk me through one iteration of a ReAct loop at the API level (what's in `messages`, what's a `tool_use_id`).
 2. What are your loop's exit conditions and why each one?

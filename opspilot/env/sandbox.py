@@ -22,14 +22,10 @@ class Sandbox(BaseModel):
 
     root: Path
 
-    # [HARNESS:ENV] Bounded — every file access is confined to the sandbox root.
-    # WHY: tool arguments (e.g. a service name used to build a log path) come from
-    # model output. A model that's confused or adversarially prompted could send
-    # "../../../etc/passwd" as a "service name" — this must never escape `root`,
-    # on this machine or in eval/CI sandboxes running many scenarios side by side.
-    # INTERVIEW: "How do you sandbox an agent's file access?" → reject absolute
-    # paths and ".." components up front, then resolve() and re-check containment
-    # so symlinks can't be used to escape either.
+    # [HARNESS:ENV] Bounded: every file access is confined to the sandbox root.
+    # WHY: paths are built from model output; "../../etc/passwd" as a service name must
+    # never escape. Reject absolute paths and "..", then resolve() and re-check
+    # containment so symlinks can't escape either.
     def path(self, rel: str | Path) -> Path:
         rel_path = Path(rel)
         if rel_path.is_absolute():
@@ -54,13 +50,9 @@ class Sandbox(BaseModel):
         return hashes
 
     # [HARNESS:EVAL] Readable end state, not just hashes -- what graders check.
-    # WHY: snapshot() says *whether* files changed; a grader asserting
-    # "checkout ended on config v12" needs *what* they say. Flat dotted keys
-    # ("checkout.config_version") keep final_state expectations in YAML
-    # trivial, and capturing this at trial end means stored trials can be
-    # re-graded later without the (deleted) sandbox.
-    # INTERVIEW: "How do you grade side effects, not just the answer?" ->
-    # diff the environment's final state against an expected state.
+    # WHY: snapshot() says *whether* files changed; a grader needs *what* they say
+    # ("checkout.config_version": 12). Captured at trial end, so stored trials can be
+    # re-graded after the sandbox is gone.
     def facts(self) -> dict[str, Any]:
         facts: dict[str, Any] = {}
         state_path = self.root / "state.json"

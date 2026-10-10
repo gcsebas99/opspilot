@@ -15,35 +15,19 @@ class MongoStore:
     """
 
     def __init__(self, uri: str, db_name: str = "opspilot") -> None:
-        # [HARNESS:HITL] tz_aware=True -- BSON has no timezone concept, so a
-        # naive client hands back naive datetimes for anything written as
-        # datetime.now(UTC) (every timestamp field here). That's silent
-        # until code actually subtracts one against a fresh aware
-        # datetime.now(UTC) -- exactly what resume_react_graph does to
-        # compute the approval_wait span duration (requested_at, read back
-        # from Mongo, vs. decided_at, freshly created) -- raising
-        # `TypeError: can't subtract offset-naive and offset-aware
-        # datetimes`. Caught by the live Mongo verification for 2.5, not by
-        # any test against MemoryStore (which never round-trips through BSON
-        # and so never loses tzinfo in the first place).
+        # tz_aware=True: BSON stores no timezone, so a naive client returns naive
+        # datetimes -- and subtracting one from datetime.now(UTC) (approval_wait does)
+        # raises TypeError. MemoryStore never round-trips BSON, so only real Mongo shows it.
         self._client: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(uri, tz_aware=True)
         self._db = self._client[db_name]
 
     async def close(self) -> None:
         await self._client.close()
 
-    # [HARNESS:OBS] Index design follows query shape, not table shape.
-    # WHY: `spans` is always queried scoped to one run, in time order (to
-    # render a waterfall) -- a compound (run_id, start) index makes that a
-    # single index scan. `runs` is browsed globally by recency or filtered
-    # by scenario, so its indexes lead with those fields instead. Same
-    # reasoning for audit_log (time-ordered, and per-run lookups) and
-    # approvals (filtered by status for the pending queue, and per-run).
-    # INTERVIEW: "Why is spans a separate collection with its own index
-    # instead of embedding it in the run doc?" -> unbounded growth (a long
-    # run can produce far more spans than fit under Mongo's 16MB document
-    # limit) and a different, more frequent query pattern than the run
-    # document itself.
+    # [HARNESS:OBS] Indexes follow query shape, not table shape.
+    # WHY: spans are read per run in time order (waterfall) -> (run_id, start); runs
+    # are browsed by recency or scenario. Spans live in their own collection because
+    # a long run's spans could outgrow Mongo's 16MB document limit.
     async def ensure_indexes(self) -> None:
         await self._db.runs.create_index([("created_at", pymongo.DESCENDING)])
         await self._db.runs.create_index([("scenario", pymongo.ASCENDING)])
@@ -167,18 +151,9 @@ class MongoStore:
         if result.matched_count == 0:
             raise KeyError(f"no eval trial {trial_id!r} to update")
 
-    # [HARNESS:OBS] Real Mongo aggregation pipelines, not fetch-then-compute.
-    # WHY: $percentile (MongoDB 7+, confirmed against the project's own
-    # mongo:7 container rather than assumed) and $group push the computation
-    # to the database -- the alternative (pulling every span/run doc back
-    # and reducing in Python) doesn't scale past a small dev dataset and
-    # defeats the point of using an aggregation database. MemoryStore
-    # mirrors the same *results* in plain Python purely so tests don't need
-    # Mongo running -- it is not meant to demonstrate the technique.
-    # INTERVIEW: "Why $percentile with method: approximate instead of exact
-    # sort+index?" -> approximate (t-digest) percentiles are the documented,
-    # performant choice for this use case; exact percentiles require sorting
-    # the whole collection.
+    # [HARNESS:OBS] Aggregations run in Mongo ($group, $percentile), not in Python.
+    # WHY: fetch-then-compute doesn't scale past a dev dataset. $percentile uses the
+    # approximate method (no full sort). MemoryStore only mirrors the results for tests.
     async def model_call_latency_percentiles(self) -> dict[str, float]:
         cursor = await self._db.spans.aggregate(
             [

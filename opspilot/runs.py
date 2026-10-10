@@ -137,13 +137,9 @@ async def create_run(
 
 
 # [HARNESS:HITL] Resume = rebuild the run from durable state, not from memory.
-# WHY: an approval can arrive minutes later, in another HTTP request or
-# another process (`opspilot approve`, a restarted web server). Everything a
-# resume needs -- sandbox location, model, mode, cassette, prompt version --
-# comes from the stored RunDoc; the conversation itself comes from the
-# checkpointer. Nothing depends on the process that started the run.
-# INTERVIEW: "What if the server restarts while a run awaits approval?" ->
-# RunDoc + Mongo checkpointer hold everything; open_run() rebuilds it.
+# WHY: approvals can arrive later, from another request or process. The RunDoc
+# holds sandbox location, model, mode and cassette; the checkpointer holds the
+# conversation. Nothing depends on the process that started the run.
 async def open_run(store: Store, settings: Settings, run_id: str) -> RunHandle:
     """Rebuild a handle for an existing run (e.g. to resume it after approval)."""
     run = await store.get_run(run_id)
@@ -169,18 +165,10 @@ class SandboxLost(RuntimeError):
     """A run's sandbox is gone and can't be faithfully rebuilt."""
 
 
-# [HARNESS:ENV] Rebuild a lost sandbox -- but only when that's provably safe.
-# WHY: on hosts with an ephemeral disk (Render free: wiped on every restart
-# and spin-down), a run paused for approval keeps its *conversation* in the
-# Mongo checkpointer but loses its sandbox files. Scenarios are seeded and
-# deterministic, so regenerating gives the exact starting state -- which IS
-# the current state as long as nothing destructive has run yet (reads don't
-# mutate; destructive actions are precisely what waits for approval). If
-# one already ran, a rebuild would silently resume on the wrong world, so
-# refuse loudly instead. The audit log is the evidence either way.
-# INTERVIEW: "What if the server restarts while a run awaits approval?" ->
-# checkpointer holds the conversation; the environment is reproducible from
-# (scenario, seed) plus the audit trail of what changed it.
+# [HARNESS:ENV] Rebuild a lost sandbox -- only when that's provably safe.
+# WHY: ephemeral disks (Render free) lose sandboxes on restart. A seeded scenario
+# regenerates the exact start state, which is still current if nothing destructive
+# ran yet; the audit log is the evidence. Otherwise refuse rather than resume wrong.
 async def _rebuild_lost_sandbox(store: Store, run: RunDoc, sandbox_dir: Path) -> None:
     executed = [
         e.target

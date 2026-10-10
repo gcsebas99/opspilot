@@ -120,7 +120,7 @@ Defense in depth, three layers:
 
 **Understand:** difference between observability (how is the system behaving) and auditability (who did what, provably).
 
-## Interview questions
+## Questions to test yourself
 
 1. Show me a trace of one request. What's in a model span vs a tool span?
 2. What metrics would you put on an agent dashboard? What would you page on?

@@ -85,41 +85,25 @@ class ToolRegistry:
         if tool is None:
             return ToolResult(ok=False, content=f"unknown tool {name!r}")
 
-        # [HARNESS:TOOLS] Schema-driven self-correction.
-        # WHY: the model's tool_use args are just JSON it generated -- it can send a
-        # missing field, wrong type, or extra garbage. Returning a normal ToolResult
-        # (ok=False) instead of letting the exception propagate lets the *next* model
-        # turn read the validation error and retry with corrected arguments, the same
-        # way a human engineer would read a TypeError and fix their call.
-        # INTERVIEW: "What happens when the model sends bad tool args?" -> pydantic
-        # validates against input_model, failure becomes a normal (ok=False) tool
-        # result, not an exception -- the loop never sees a crash either way.
+        # [HARNESS:TOOLS] Schema-driven self-correction: bad args become a tool result.
+        # WHY: tool args are model-generated JSON. A validation error returned as
+        # ok=False lets the next turn read it and retry, instead of crashing the run.
         try:
             args = tool.input_model.model_validate(raw_args)
         except ValidationError as exc:
             return ToolResult(ok=False, content=f"invalid arguments for {name!r}: {exc}")
 
         # [HARNESS:ORCH] Tool exceptions never crash the loop.
-        # WHY: a tool implementation bug (bad regex, missing file, divide-by-zero) is
-        # inevitable across a dozen tools. Without this boundary, one bad call would
-        # kill the whole run instead of giving the model a chance to see the error and
-        # route around it (or escalate).
-        # INTERVIEW: "How do you keep one flaky tool from taking down the agent?" ->
-        # every tool call runs inside a try/except at the registry boundary; the
-        # exception becomes ok=False content, never an unhandled crash.
+        # WHY: some tool bug is inevitable across a dozen tools; turning the exception
+        # into ok=False content lets the model route around it (or escalate).
         try:
             result = tool.fn(sandbox, args)
         except Exception as exc:
             return ToolResult(ok=False, content=f"tool {name!r} raised {type(exc).__name__}: {exc}")
 
         # [HARNESS:CONTEXT] Bound tool output before it enters the context window.
-        # WHY: an unbounded grep/log dump can blow the token budget in one step. A
-        # silent cut would also mislead the model into thinking it saw everything --
-        # the explicit hint tells it to narrow its query instead of trusting a partial
-        # result.
-        # INTERVIEW: "Why truncate, and how does the model know it happened?" -> hard
-        # char cap per tool result + a "...[N more lines truncated]" hint, and
-        # ToolResult.truncated=True for anything downstream (tracing, UI) to key off.
+        # WHY: one log dump can blow the token budget. The explicit truncation hint tells
+        # the model it saw a partial result and should narrow its query.
         content, truncated = _truncate(result.content, self.max_output_chars)
         if truncated:
             return result.model_copy(update={"content": content, "truncated": True})

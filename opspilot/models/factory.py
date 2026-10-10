@@ -42,13 +42,10 @@ class LiveCallRefused(RuntimeError):
     """A mode that spends money was requested without what it needs."""
 
 
-# [HARNESS:GUARD] Cost guard -- spending money is always an explicit opt-in.
-# WHY: a demo or a forgotten shell loop must never burn API credit by
-# accident. The default mode is replay ($0); live/record only happen when a
-# human asks for them (--mode or OPSPILOT_MODEL_MODE), and fail fast without
-# an API key instead of erroring deep inside the first model call.
-# INTERVIEW: "How do you keep a demo agent from running up a bill?" ->
-# safe-by-default replay, explicit opt-in for live, recorded cassettes.
+# [HARNESS:GUARD] Cost guard: spending money is always an explicit opt-in.
+# WHY: a demo or a forgotten loop must never burn API credit by accident. The
+# default is replay ($0); live/record need --mode or OPSPILOT_MODEL_MODE, and fail
+# fast without a key.
 def resolve_mode(requested: str | None, settings: Settings) -> ModelMode:
     mode = requested or settings.opspilot_model_mode
     if mode not in ("live", "record", "replay"):
@@ -95,12 +92,9 @@ def recorded_demo_paths(root: Path = DEMO_CASSETTE_ROOT) -> list[DemoPath]:
     return paths
 
 
-# [HARNESS:EVAL] One switch decides whether a run costs money.
-# WHY: live/record/replay is a property of the *run*, not of the loop -- the
-# loop only sees a ModelClient. Live factories are passed in uncalled, so
-# replay never constructs an API client and needs no API key at all.
-# INTERVIEW: "How do you run agent evals in CI for free?" -> the same
-# harness in replay mode: recorded responses, zero network, loud on drift.
+# [HARNESS:EVAL] One switch decides whether a run costs money: live/record/replay.
+# WHY: the mode belongs to the run, not the loop (which only sees a ModelClient).
+# Live factories are passed in uncalled, so replay never builds an API client.
 def build_model_client(
     settings: Settings,
     mode: ModelMode,

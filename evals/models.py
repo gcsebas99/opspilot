@@ -5,13 +5,9 @@ from pydantic import BaseModel, Field, field_validator
 from opspilot.env.scenarios import get_scenario
 from opspilot.policy.permissions import Role
 
-# [HARNESS:EVAL] approval_policy is a case-level fixture, not something the
-# agent or a human decides at run time -- the runner (3.2) auto-resolves
-# every RequireApproval pause according to this field so a k-trial eval run
-# never blocks on real human input. "approve_all"/"reject_all" cover the
-# common cases; the dict form scripts a specific decision per tool name for
-# cases that need finer control (e.g. approve the rollback but reject a
-# restart) without inventing a whole new mini-language.
+# [HARNESS:EVAL] approval_policy: the case decides approvals, not a live human.
+# WHY: k-trial sweeps must never block on input. approve_all / reject_all cover
+# most cases; a per-tool dict scripts finer ones (approve rollback, reject restart).
 ApprovalPolicy = Literal["approve_all", "reject_all"] | dict[str, Literal["approve", "reject"]]
 
 

@@ -44,11 +44,9 @@ DEFAULT_BASE_ROOT = Path("tmp/eval_runs")
 DEFAULT_CASSETTE_ROOT = Path("evals/cassettes")
 
 
-# [HARNESS:EVAL] Model construction is injectable, not inlined -- the
-# runner's whole job is to be called many times, from tests and from every
-# mode. The injected factories build only the *live* backend; the runner
-# wraps it per mode (opspilot/models/factory.py), so a test can record with
-# a ScriptedModel as the "live" model and then replay the resulting cassette.
+# [HARNESS:EVAL] Model construction is injected, not inlined.
+# WHY: factories build only the *live* backend and the runner wraps it per mode,
+# so a test can record with a ScriptedModel as "live", then replay it.
 def cassette_path(cassette_root: Path, case_id: str, trial: int) -> Path:
     # One file per (case, trial): k trials are k independent samples, and
     # trials never share a writer when they run concurrently.
@@ -99,13 +97,9 @@ async def _apply_grading(
     )
 
 
-# [HARNESS:EVAL] Approval auto-resolution -- what a human's interactive
-# `y`/`n` prompt (cli.py's `opspilot run`) becomes when nothing is watching.
-# WHY: an unscripted tool under a scripted policy is a *dataset* bug (the
-# case author forgot to cover a tool this run can actually hit), not a
-# runtime condition to paper over with a default -- guessing "reject" or
-# "approve" would silently mask exactly the case authoring mistake this
-# should surface.
+# [HARNESS:EVAL] Approval auto-resolution: the case's policy answers for the human.
+# WHY: a tool the scripted policy doesn't cover is a dataset bug -- raise, rather
+# than guess approve/reject and silently hide the authoring mistake.
 def _resolve_decision(policy: ApprovalPolicy, tool: str) -> dict[str, Any]:
     if policy == "approve_all":
         return {"decision": "approve", "approver": "eval-runner"}
@@ -163,10 +157,9 @@ async def run_trial(
 ) -> EvalTrialDoc:
     """Run one (case, trial) to completion and persist the result.
 
-    [HARNESS:ORCH] Never lets one trial's crash take down a whole sweep --
-    exactly the same boundary as the tool registry (opspilot/tools/base.py):
-    catch broadly here, record the failure on the trial's own document, and
-    let every other trial in the sweep keep going.
+    [HARNESS:ORCH] One trial's crash never takes down the sweep.
+    WHY: same boundary as the tool registry -- catch broadly here, record the
+    failure on that trial's document, and let the other trials continue.
     """
     run_id = f"{sweep_id}:{case.id}:{trial}"
     started_at = datetime.now(UTC)
@@ -427,12 +420,10 @@ async def regrade_sweep(
 ) -> list[EvalTrialDoc]:
     """Re-grade a stored sweep without re-running the agent.
 
-    [HARNESS:EVAL] Graders are decoupled from runs. WHY: fixing a grader
-    or a case's expectations shouldn't cost a re-run of every agent trial --
-    trials store everything graders need (3.4a), so re-grading is free for
-    the deterministic layers and replayable for the judge. Uses the
-    *current* golden case definitions, which is the point: dataset fixes
-    apply to old runs.
+    [HARNESS:EVAL] Graders are decoupled from runs: re-grade without re-running.
+    WHY: trials store everything graders need, so fixing a grader or a case is free
+    for the deterministic layers and replayable for the judge. Uses the *current*
+    case definitions on purpose -- dataset fixes apply to old runs.
     """
     cases = {case.id: case for case in load_cases("golden")}
     regraded: list[EvalTrialDoc] = []

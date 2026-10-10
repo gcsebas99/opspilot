@@ -35,15 +35,10 @@ def sign(secret: str, timestamp: str, body: bytes) -> str:
     return "sha256=" + mac.hexdigest()
 
 
-# [HARNESS:GUARD] Signed webhooks -- who may wake the agent up.
-# WHY: this endpoint starts an agent that can request destructive actions.
-# An HMAC over the raw body proves the sender knows the shared secret and
-# that the body wasn't altered; signing the timestamp too, and rejecting
-# stale ones, stops a captured request from being replayed later. Constant-
-# time comparison so response timing can't leak a correct prefix.
-# INTERVIEW: "How do you secure a webhook that triggers an agent?" -> HMAC
-# signature over timestamp+body, tolerance window, compare_digest, and
-# idempotency keys so duplicates (retries, replays) can't double-run it.
+# [HARNESS:GUARD] Signed webhooks: only the secret's holder can wake the agent.
+# WHY: HMAC over timestamp+body proves the sender and that nothing was altered;
+# a stale timestamp is rejected, so a captured request can't be replayed later.
+# Constant-time compare, so timing can't leak a correct prefix.
 def verify(
     secret: str,
     timestamp: str | None,

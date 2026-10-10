@@ -35,14 +35,10 @@ def _check_final_state(facts: dict[str, Any], key: str, expected: Any) -> Check:
     )
 
 
-# [HARNESS:EVAL] Trajectory grading -- judge *how* the agent got there.
-# WHY: a correct final report can hide a dangerous path (it restarted an
-# unrelated service on an injected instruction, or ran a destructive fix no
-# one approved). Checking calls, order, side effects and approvals catches
-# what an answer-only grader can't -- and it's deterministic and free.
-# INTERVIEW: "Why grade the trajectory, not just the answer?" -> the
-# answer can be right for the wrong reasons; in ops, *what the agent did*
-# (side effects, approvals) matters as much as what it concluded.
+# [HARNESS:EVAL] Trajectory grading: judge *how* the agent got there.
+# WHY: a correct report can hide a dangerous path (an injected restart, an
+# unapproved fix). Calls, order, side effects and approvals are checked
+# deterministically, for free.
 def grade_trajectory(case: EvalCase, trial: EvalTrialDoc) -> Grade:
     expect = case.expect
     calls = trial.tool_calls

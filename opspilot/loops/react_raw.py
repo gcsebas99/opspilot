@@ -104,12 +104,9 @@ async def run_react_loop(
     last_signature: tuple[str, str] | None = None
     repeat_count = 0
     nudged_for_stuck = False
-    # [HARNESS:GUARD] Services a *successful read tool call* has actually
-    # touched this run -- the "evidence" half of the scope check
-    # (guardrails.is_in_scope). Only grown from reads that succeeded, never
-    # from a destructive attempt (blocked or not): otherwise an attacker
-    # could "unlock" an out-of-scope service by trying a blocked destructive
-    # call once, then repeating it now that it's in known_services.
+    # [HARNESS:GUARD] Services a *successful read* touched this run (scope evidence).
+    # WHY: only successful reads count, never a destructive attempt -- otherwise one
+    # blocked call could "unlock" an out-of-scope service for the next try.
     known_services: set[str] = set()
 
     def emit(event_type: EventType, **data: Any) -> None:
@@ -129,12 +126,8 @@ async def run_react_loop(
 
     while True:
         # [HARNESS:LOOP] Exit condition #2 -- hard step cap.
-        # WHY: a confused model can loop forever and burn tokens. This is
-        # the cheapest guardrail -- checked before spending another model
-        # call, not after.
-        # INTERVIEW: "How do you stop runaway agents?" -> step cap, token
-        # budget, stuck detection, and a required terminal tool call --
-        # four independent backstops, not just one.
+        # WHY: a confused model can loop forever and burn tokens; this is the cheapest
+        # backstop, checked before each model call rather than after.
         if steps >= effective_max_steps:
             return finish("max_steps")
 
@@ -157,14 +150,8 @@ async def run_react_loop(
         totals.cache_read_input_tokens += response.usage.cache_read_input_tokens
 
         # [HARNESS:LOOP] Exit condition #3 -- cumulative token budget.
-        # WHY: the step cap alone doesn't bound cost -- a single step can
-        # burn a huge number of tokens (e.g. a giant tool result). Track
-        # spend across the whole run, independent of step count, and
-        # include cache tokens: they're cheaper per-token but still
-        # represent real context growth.
-        # INTERVIEW: "What if the model is expensive but doesn't loop
-        # forever?" -> a separate cumulative token budget, because steps
-        # and tokens are not the same resource to bound.
+        # WHY: steps don't bound cost (one step can carry a huge tool result). Cache
+        # tokens count too: cheaper per token, but still real context growth.
         cumulative = (
             totals.input_tokens
             + totals.output_tokens
@@ -179,14 +166,8 @@ async def run_react_loop(
         tool_use_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
 
         # [HARNESS:LOOP] Exit condition #5 -- plain text, no tool call.
-        # WHY: this agent's contract is "always end with submit_report or
-        # escalate." A model that just chats instead of acting has drifted
-        # off-task -- nudge once (models often self-correct when told
-        # explicitly what's expected), but don't nudge forever.
-        # INTERVIEW: "What if the model just talks instead of calling a
-        # tool?" -> one explicit nudge back to the contract, then a
-        # distinct outcome (no_report) so evals can tell this apart from a
-        # genuine completed/escalated run.
+        # WHY: the contract is "end with submit_report or escalate". Nudge once (models
+        # often self-correct), then stop as no_report so evals can tell it apart.
         if not tool_use_blocks:
             no_tool_call_strikes += 1
             if no_tool_call_strikes >= 2:
@@ -204,15 +185,9 @@ async def run_react_loop(
         no_tool_call_strikes = 0
 
         # act + observe
-        # [HARNESS:LOOP] Parallel tool calls.
-        # WHY: the model may return several tool_use blocks in one turn.
-        # All of them run, and all their results go back in ONE user
-        # message, each paired to its tool_use_id -- splitting tool_result
-        # blocks across multiple messages is not what the API expects and
-        # discourages the model from making parallel calls again.
-        # INTERVIEW: "How do you handle multiple tool calls in one turn?"
-        # -> execute every one, collect every tool_result into a single
-        # user message preserving tool_use_id pairing.
+        # [HARNESS:LOOP] Parallel tool calls: run them all, answer in ONE message.
+        # WHY: the API pairs each tool_result to its tool_use_id within one user turn;
+        # splitting them across messages breaks that and discourages parallel calls.
         result_blocks: list[dict[str, Any]] = []
         terminal: tuple[str, ToolResult] | None = None
         stuck = False
@@ -226,16 +201,10 @@ async def run_react_loop(
 
             tool_start = time.monotonic()
             tool = registry.get(block.name) if block.name in registry else None
-            # [HARNESS:PERM] Enforcement point: a decision from decide() is
-            # a block, not a suggestion -- the model never sees the policy
-            # table, only the tool_result it produces. See
-            # opspilot/policy/permissions.py for why this lives here and
-            # not in the prompt. RequireApproval is treated like Deny here,
-            # permanently -- this hand-written loop has no checkpointer to
-            # pause on, so it can't offer real HITL. The graph strategy
-            # (opspilot/loops/graph.py) implements the real interrupt/resume
-            # flow for RequireApproval (2.5); that's one of the concrete
-            # reasons this project ported to LangGraph in the first place.
+            # [HARNESS:PERM] Enforcement point: the policy decision is applied, not suggested.
+            # WHY: the model never sees the policy table, only the tool_result. This loop has
+            # no checkpointer to pause on, so RequireApproval acts like Deny here; the graph
+            # strategy implements the real pause/resume.
             policy_decision: str | None = None
             denial_reason: str | None = None
             if tool is None:
@@ -264,11 +233,9 @@ async def run_react_loop(
                     known_services.add(service)
             tool_duration_ms = (time.monotonic() - tool_start) * 1000
 
-            # [HARNESS:GUARD] Detection is a signal only -- see
-            # guardrails.detect_prompt_injection's WHY. Framing
-            # (frame_tool_output) applies to every tool result regardless of
-            # a match, labeling it as untrusted data in the transcript
-            # itself; the warning line is prepended only when a pattern hit.
+            # [HARNESS:GUARD] Every tool result is framed as untrusted data.
+            # WHY: framing applies always; the injection warning is prepended only when a
+            # known pattern matches (detection is a signal, not the defense).
             injection_patterns = detect_prompt_injection(result.content)
             framed_content = frame_tool_output(block.name, result.content)
             if injection_patterns:
@@ -315,15 +282,8 @@ async def run_react_loop(
                 terminal = (block.name, result)
 
             # [HARNESS:LOOP] Exit condition #4 -- stuck detection.
-            # WHY: a model can loop calling the identical tool with
-            # identical arguments, learning nothing new each time (e.g.
-            # re-running the same grep because it misread the output). One
-            # nudge gives it a chance to self-correct; a 4th identical call
-            # after that nudge means it's genuinely stuck, not re-verifying.
-            # INTERVIEW: "How do you detect an agent stuck in a loop?" ->
-            # track (tool_name, canonical_args) of the last call; 3 in a
-            # row triggers one nudge, a 4th ends the run as `stuck` instead
-            # of burning the rest of the step/token budget on repetition.
+            # WHY: the same tool with the same args learns nothing new. Three in a row gets
+            # one nudge; a fourth ends the run as `stuck` instead of burning the budget.
             if repeat_count == 3 and not nudged_for_stuck:
                 result_blocks.append(
                     {
@@ -344,14 +304,9 @@ async def run_react_loop(
         if stuck:
             return finish("stuck")
 
-        # [HARNESS:LOOP] Exit condition #1 -- terminal tool called.
-        # WHY: submit_report/escalate are the agent's only intended way to
-        # finish -- everything else above is a guardrail against NOT
-        # reaching this point.
-        # INTERVIEW: "What's the happy path exit?" -> the model calls
-        # submit_report (outcome=completed) or escalate (outcome=escalated)
-        # and the loop returns immediately with that tool's structured data
-        # as the report.
+        # [HARNESS:LOOP] Exit condition #1 -- terminal tool called (the happy path).
+        # WHY: submit_report / escalate are the only intended way to finish; every
+        # other exit above is a backstop against never getting here.
         if terminal is not None:
             name, result = terminal
             outcome: Outcome = "completed" if name == "submit_report" else "escalated"

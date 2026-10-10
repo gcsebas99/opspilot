@@ -39,18 +39,9 @@ def _compute_hash(entry: AuditDoc) -> str:
 
 
 # [HARNESS:AUDIT] Tamper-evident hash chain, not just an append-only table.
-# WHY: append-only stops accidental loss, not deliberate tampering -- anyone
-# with write access to Mongo can edit a historical document in place, and a
-# plain append-only collection has no way to detect that after the fact.
-# Chaining each record's hash into the next means editing (or deleting, or
-# reordering) any single record breaks every hash computed from it forward
-# -- verify_chain() below recomputes the whole chain and reports exactly
-# where it diverges from what's stored.
-# INTERVIEW: "How would you prove nobody tampered with the audit log?" ->
-# recompute each record's hash from its own fields plus the previous
-# record's hash and compare to what's stored; the first mismatch is the
-# tampered (or truncated/reordered) record -- not just "some record is
-# wrong somewhere."
+# WHY: each record's hash covers its fields plus the previous hash, so editing,
+# deleting or reordering any record breaks every hash after it -- and
+# verify_chain() reports exactly where.
 async def record_audit(
     store: Store,
     *,
@@ -112,14 +103,9 @@ def verify_chain(entries: Sequence[AuditDoc]) -> ChainVerification:
     return ChainVerification(ok=True, total_entries=len(entries))
 
 
-# [HARNESS:AUDIT] Reconstructing audit entries from events, same reasoning
-# as instrumentation.py's record_loop_spans: the raw loop has no live store
-# access (its `on_event` callback is sync), so this is a second, post-hoc
-# consumer of the same event stream, called once the run completes.
-# RequireApproval is treated identically to Deny here -- the raw loop
-# permanently blocks both (see react_raw.py's [HARNESS:PERM] note), so from
-# an audit standpoint a blocked call is a blocked call regardless of which
-# policy outcome produced it.
+# [HARNESS:AUDIT] Raw-loop audit entries, rebuilt from its event stream.
+# WHY: the raw loop's event callback is sync (no store access), so this runs once
+# after the run. RequireApproval is logged like Deny: this loop blocks both.
 async def record_loop_audit(
     store: Store,
     run_start: datetime,
@@ -165,12 +151,9 @@ async def record_loop_audit(
         cursor += timedelta(milliseconds=duration_ms)
 
 
-# [HARNESS:AUDIT] Config-change tracking. WHY: AGENTS.md, the runbook
-# index, or a tool schema changing between two runs is exactly the kind of
-# silent behavior shift an incident postmortem needs to rule in or out --
-# "did the agent's instructions change right before it started doing this?"
-# prompt_version (2.1's hash of exactly that content) makes the comparison
-# a string equality check instead of a diff nobody remembers to run.
+# [HARNESS:AUDIT] Record when the agent's instructions change between runs.
+# WHY: "did its prompt or tools change right before this?" is a key postmortem
+# question; prompt_version (a hash of that content) makes it an equality check.
 async def record_prompt_version_change_if_needed(
     store: Store, *, run_id: str, prompt_version: str, model: str, ts: datetime
 ) -> None:

@@ -12,8 +12,8 @@ For each day, work through the spec's sub-tasks one at a time:
 1. **Spec** → open `docs/specs/dayN.md`, paste the "Kickoff prompt" into Claude Code (plan mode).
 2. **Build** → approve/adjust the plan, let Claude Code implement *one sub-task*.
 3. **Review** → read the diff and every `[HARNESS:*]` comment. Run it. Try to break it.
-4. **Explain back** → write 3–5 lines per concept in `LEARNING.md` *in your own words*.
-   Answer the day's "Interview questions" out loud. If you can't, ask Claude Code to walk you through it.
+4. **Explain back** → write 3–5 lines per concept *in your own words* (your own notes).
+   Answer the day's "Questions to test yourself" out loud. If you can't, ask Claude Code to walk you through it.
 5. **Commit** → one commit per sub-task (`feat(loop): add stuck detection exit condition`).
 
 Rule of thumb: if you're tempted to skip step 3–4 to go faster, cut scope instead.

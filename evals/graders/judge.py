@@ -55,12 +55,9 @@ _CRITERION_SCHEMA = {
     "required": ["score", "rationale"],
     "additionalProperties": False,
 }
-# [HARNESS:EVAL] strict tool schema -- forced tool use isn't enough.
-# WHY: tool_choice guarantees the judge *calls* submit_grades, not that the
-# arguments match the schema. On calibration it once answered {"score": 1},
-# collapsing all five criteria into one field. `strict` makes the API
-# constrain generation to the schema; pydantic validation below stays as
-# defense in depth (and is what caught the collapse in the first place).
+# [HARNESS:EVAL] Strict tool schema: forcing the tool call isn't enough.
+# WHY: tool_choice forces *a* call, not valid arguments (the judge once replied
+# {"score": 1}). `strict` constrains generation; pydantic stays as a second check.
 JUDGE_TOOL: dict[str, Any] = {
     "name": "submit_grades",
     "description": "Submit a 1-5 score and short rationale for every rubric criterion.",
@@ -74,11 +71,9 @@ JUDGE_TOOL: dict[str, Any] = {
 }
 _TOOL_CHOICE = {"type": "tool", "name": "submit_grades", "disable_parallel_tool_use": True}
 
-# [HARNESS:EVAL] Versioned judge -- the prompt + output schema are hashed.
-# WHY: a judge is part of the measuring instrument. If the rubric changes,
-# scores before and after aren't comparable; storing this hash on every
-# grade makes "the judge changed" visible in `eval compare` (3.5) instead of
-# masquerading as an agent regression.
+# [HARNESS:EVAL] Versioned judge: the prompt + output schema are hashed.
+# WHY: the judge is part of the measuring instrument; storing this hash on every
+# grade makes "the judge changed" visible instead of looking like a regression.
 JUDGE_PROMPT_VERSION = hashlib.sha256(
     (JUDGE_PROMPT + json.dumps(JUDGE_TOOL, sort_keys=True)).encode()
 ).hexdigest()[:12]
@@ -132,15 +127,10 @@ def _failed(reason: str, **details: Any) -> Grade:
     )
 
 
-# [HARNESS:EVAL] LLM-as-judge for what code can't check -- report quality.
-# WHY: "is the causal chain right, is the evidence real, is the confidence
-# honest?" has no regex. The judge gets ground truth + the full trajectory
-# (so it can catch hallucinated facts) and must answer through a forced
-# tool call validated by pydantic -- a malformed verdict is a failed grade,
-# never a silently-accepted guess.
-# INTERVIEW: "How do you trust an LLM judge?" -> rubric with anchors,
-# ground truth in the prompt, structured output, versioned prompt, and a
-# calibration set of human-scored reports it must agree with (judge-check).
+# [HARNESS:EVAL] LLM-as-judge for what code can't check: report quality.
+# WHY: causal chain, real evidence, honest confidence have no regex. The judge
+# sees ground truth + the full trajectory, and answers via a validated tool call:
+# a malformed verdict is a failed grade, never a silently accepted guess.
 async def grade_judge(
     case: EvalCase, trial: EvalTrialDoc, client: ModelClient, judge_model: str
 ) -> Grade:

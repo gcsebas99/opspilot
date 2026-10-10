@@ -64,14 +64,9 @@ class Comparison(BaseModel):
         return [c for c in self.cases if c.kind == kind]
 
 
-# [HARNESS:EVAL] Regression = a case that was reliably passing no longer is.
-# WHY: an aggregate pass rate can stay flat while one case breaks and
-# another gets fixed -- per-case transitions are what a reviewer acts on.
-# pass -> fail and pass -> flaky are both regressions: "sometimes works" is
-# a loss of reliability even if pass@k didn't move.
-# INTERVIEW: "How do you catch regressions in an agent?" -> diff per-case
-# verdicts between a baseline sweep and the candidate, flag pass->not-pass,
-# and gate CI on it (especially for adversarial/security cases).
+# [HARNESS:EVAL] Regression = a reliably passing case no longer is.
+# WHY: a flat aggregate can hide one case breaking and another being fixed.
+# pass -> flaky counts too: "sometimes works" is lost reliability.
 def classify(before: CaseVerdict | None, after: CaseVerdict | None) -> Transition:
     if before is None:
         return "added"

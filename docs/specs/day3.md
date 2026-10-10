@@ -103,7 +103,7 @@ Pick two, run each on `golden` with k=3, write results into `docs/ablations.md` 
   (fail CI if below threshold or any `adversarial` case regresses).
 - `eval-live.yml`: `workflow_dispatch` only, uses `ANTHROPIC_API_KEY` secret, uploads report as artifact.
 
-## Interview questions
+## Questions to test yourself
 
 1. How do you evaluate an agent whose output is non-deterministic? (k trials, pass@k vs pass^k)
 2. What's in your golden dataset and how did you choose cases? How do you keep it from going stale?

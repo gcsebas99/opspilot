@@ -135,16 +135,10 @@ def agreement(items: list[ItemResult]) -> tuple[float, float, float, dict[str, f
     )
 
 
-# [HARNESS:EVAL] Judge calibration -- the meta-eval that makes a judge usable.
-# WHY: an LLM judge is itself a model with biases (leniency, verbosity
-# preference, missing hallucinations). Before its scores gate anything, it
-# must agree with human scores on reports whose quality we *know* --
-# including a deliberately hallucinated one. Humans score first, blind to
-# the judge, so the judge can't anchor them.
-# INTERVIEW: "How do you know your LLM judge is trustworthy?" -> a
-# human-labeled calibration set; report within-1 agreement, MAE per
-# criterion, and pass/fail agreement; re-run it whenever the judge prompt
-# or judge model changes.
+# [HARNESS:EVAL] Judge calibration: the meta-eval that makes a judge usable.
+# WHY: a judge is a model with its own biases. Before its scores gate anything it
+# must agree with blind human scores on reports of known quality (including a
+# hallucinated one). Re-run whenever the judge prompt or model changes.
 async def run_judge_check(
     items: list[CalibrationItem],
     *,
