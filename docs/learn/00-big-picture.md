@@ -51,7 +51,7 @@ flowchart TB
     SVC["Run service<br/>opspilot/runs.py"]
     subgraph loops["The loop (two implementations)"]
         RAW["raw: react_raw.py"]
-        GRAPH["graph: LangGraph, graph.py"]
+        LANGGRAPH["graph: LangGraph, graph.py"]
     end
     CTX["Context<br/>AGENTS.md + runbook index"]
     MODEL["Model client<br/>live / record / replay"]

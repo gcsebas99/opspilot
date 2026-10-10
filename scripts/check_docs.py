@@ -26,6 +26,37 @@ LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 CODE_REF_RE = re.compile(r"`([\w./-]+\.(?:py|ya?ml|md|toml|html|json|jsonl|txt))(?:::(\w+))?`")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
+# Mermaid matches keywords case-insensitively, so an id like `Loop` or `End`
+# silently breaks the whole diagram on GitHub ("Expecting ..., got 'loop'").
+MERMAID_RESERVED = {
+    "sequenceDiagram": {
+        "loop",
+        "alt",
+        "else",
+        "opt",
+        "par",
+        "and",
+        "rect",
+        "end",
+        "critical",
+        "break",
+        "note",
+        "over",
+        "activate",
+        "deactivate",
+        "autonumber",
+        "box",
+    },
+    "flowchart": {"end", "subgraph", "graph", "flowchart", "style", "class", "click"},
+}
+MERMAID_ID_RES = {
+    "sequenceDiagram": [re.compile(r"^\s*(?:participant|actor)\s+(\w+)")],
+    "flowchart": [
+        re.compile(r"^\s*subgraph\s+(\w+)"),
+        re.compile(r"^\s*(\w+)\s*[\[\(\{]"),
+    ],
+}
+
 
 @dataclass(frozen=True)
 class Problem:
@@ -54,6 +85,35 @@ def prose_lines(text: str) -> list[tuple[int, str]]:
         if not in_fence:
             out.append((number, line))
     return out
+
+
+def mermaid_problems(text: str) -> list[tuple[int, str]]:
+    """(line, message) for ids in ```mermaid blocks that collide with keywords."""
+    problems: list[tuple[int, str]] = []
+    kind: str | None = None
+    in_mermaid = False
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("```mermaid"):
+            in_mermaid, kind = True, None
+            continue
+        if in_mermaid and stripped.startswith("```"):
+            in_mermaid = False
+            continue
+        if not in_mermaid:
+            continue
+        if kind is None and stripped:
+            kind = (
+                "flowchart"
+                if stripped.split()[0] in ("flowchart", "graph")
+                else stripped.split()[0]
+            )
+            continue
+        for pattern in MERMAID_ID_RES.get(kind or "", []):
+            match = pattern.match(line)
+            if match and match[1].lower() in MERMAID_RESERVED[kind or ""]:
+                problems.append((number, f"Mermaid id {match[1]!r} is a reserved word"))
+    return problems
 
 
 def defines(path: Path, symbol: str) -> bool:
@@ -98,7 +158,9 @@ def check(root: Path = ROOT) -> tuple[list[Problem], list[tuple[str, int, str]]]
     external: list[tuple[str, int, str]] = []
     for doc in doc_files(root):
         rel = doc.relative_to(root).as_posix()
-        for number, line in prose_lines(doc.read_text()):
+        text = doc.read_text()
+        problems += [Problem(rel, n, message) for n, message in mermaid_problems(text)]
+        for number, line in prose_lines(text):
             for target in LINK_RE.findall(line):
                 if target.startswith(("http://", "https://")):
                     external.append((rel, number, target))

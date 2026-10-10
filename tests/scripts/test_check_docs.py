@@ -56,3 +56,16 @@ def test_real_repo_docs_are_clean() -> None:
 def test_backticked_link_text_is_not_a_second_reference(tmp_path: Path) -> None:
     doc = "The prompt is [`AGENTS.md`](../../opspilot/runs.py), not a root file.\n"
     assert _messages(_repo(tmp_path, doc)) == []
+
+
+def test_mermaid_ids_that_collide_with_keywords_are_caught(tmp_path: Path) -> None:
+    doc = (
+        "```mermaid\nsequenceDiagram\n    participant Loop as Graph loop\n"
+        "    participant App\n    loop until done\n        App->>Loop: hi\n    end\n```\n"
+        '```mermaid\nflowchart TB\n    subgraph loops["Loops"]\n    end\n'
+        '    End["finish"]\n```\n'
+    )
+    messages = _messages(_repo(tmp_path, doc))
+    assert "Mermaid id 'Loop' is a reserved word" in messages  # the real bug, 4.4b
+    assert "Mermaid id 'End' is a reserved word" in messages
+    assert len([m for m in messages if "Mermaid" in m]) == 2  # `loops`, `App` are fine
