@@ -114,6 +114,11 @@ A human then decides — in the CLI's y/n prompt (`opspilot/cli.py::_run_async`)
 `opspilot/loops/graph.py::resume_react_graph` records the decision, the time the human took (an
 `approval_wait` span), and an audit entry, then continues the graph.
 
+In the web UI (replayed, so $0): the operator run pauses before `rollback_config`, a human
+approves, and the run resumes — under its own `react_graph.resume` span — to a report.
+
+![An operator run pauses for approval of rollback_config, is approved, and completes with a report](../../assets/approval-flow.gif)
+
 ### 4. Who may approve, and only once
 
 Two rules a web UI makes urgent:

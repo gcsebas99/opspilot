@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # The curated docs. Specs and PLAN.md are plans: they name files before they exist.
-DOC_GLOBS = ("README.md", "CONCEPTS.md", "docs/learn/**/*.md")
+DOC_GLOBS = ("README.md", "CONCEPTS.md", "docs/deploy.md", "docs/learn/**/*.md")
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 CODE_REF_RE = re.compile(r"`([\w./-]+\.(?:py|ya?ml|md|toml|html|json|jsonl|txt))(?:::(\w+))?`")

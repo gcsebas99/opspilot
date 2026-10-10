@@ -109,6 +109,13 @@ to start it, and that's a different set of loops:
 
 The webhook and canary are covered in [Production](08-production.md).
 
+**One outer loop that isn't built: a "Ralph" loop.** That's the brute-force outer loop: run the
+agent again and again until an external check passes. Here it would wrap a *change*, not a run:
+propose a prompt or tool edit, run the live golden evals, keep the edit if pass^k and cost beat the
+baseline, otherwise retry with the failures as feedback. The pieces exist (evals, gates, compare —
+see [Evals](07-evals.md)). It stays a sketch because every iteration is a paid live eval, and
+looping against a fixed golden set tends to overfit it.
+
 ## Design decisions
 
 - **Exit rules are code, not prompt.** The prompt asks the model to finish with a report; the
