@@ -229,3 +229,22 @@ async def test_lost_sandbox_after_a_destructive_action_refuses_to_rebuild(
 
     with pytest.raises(SandboxLost, match="already ran restart_service"):
         await open_run(store, _SETTINGS, handle.run.run_id)
+
+
+async def test_resumed_run_spans_nest_under_their_own_run_span(tmp_path: Path) -> None:
+    """The original run span closes at the pause; the resume opens its own, so
+    nothing after an approval is left at the top level of the trace."""
+    store = MemoryStore()
+    checkpointer = InMemorySaver()
+    handle = await _operator_run(tmp_path, store)
+    await start_graph(handle, store, checkpointer)
+    reopened = await open_run(store, _SETTINGS, handle.run.run_id)
+    await resume_graph(reopened, store, checkpointer, {"decision": "approve", "approver": "t"})
+
+    spans = await store.list_spans(handle.run.run_id)
+    roots = [s for s in spans if s.parent_id is None]
+    assert sorted(s.name for s in roots) == ["react_graph", "react_graph.resume"]
+    resume = next(s for s in roots if s.name == "react_graph.resume")
+    wait = next(s for s in spans if s.kind == "approval_wait")
+    assert wait.parent_id == resume.span_id
+    assert any(s.kind == "tool_call" and s.parent_id == resume.span_id for s in spans)

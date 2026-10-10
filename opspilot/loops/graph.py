@@ -695,25 +695,30 @@ async def resume_react_graph(
             approver=current.approver if current else None,
         )
     wait_ms = (decided_at - approval.requested_at).total_seconds() * 1000
-    await tracer.record_span(
-        "approval_wait",
-        approval.tool,
-        start=approval.requested_at,
-        duration_ms=wait_ms,
-        approval_id=approval_id,
-        decision=decision["decision"],
-    )
-    await record_audit(
-        store,
-        actor=str(decision.get("approver") or "unknown"),
-        action="approval_decision",
-        target=approval.tool,
-        decision=decision["decision"],
-        run_id=run_id,
-        prompt_version=prompt_version,
-        model=settings.opspilot_model,
-        ts=decided_at,
-    )
-
-    raw_result = await compiled.ainvoke(Command(resume=decision), config=config)
+    # [HARNESS:OBS] A resumed run gets its own run span, so its spans nest again.
+    # WHY: the original run span closed when the run paused (maybe in another
+    # process); without this, everything after an approval lands at the top level.
+    async with tracer.span(
+        "run", "react_graph.resume", decision=decision["decision"], approval_id=approval_id
+    ):
+        await tracer.record_span(
+            "approval_wait",
+            approval.tool,
+            start=approval.requested_at,
+            duration_ms=wait_ms,
+            approval_id=approval_id,
+            decision=decision["decision"],
+        )
+        await record_audit(
+            store,
+            actor=str(decision.get("approver") or "unknown"),
+            action="approval_decision",
+            target=approval.tool,
+            decision=decision["decision"],
+            run_id=run_id,
+            prompt_version=prompt_version,
+            model=settings.opspilot_model,
+            ts=decided_at,
+        )
+        raw_result = await compiled.ainvoke(Command(resume=decision), config=config)
     return _finalize_or_pause(raw_result, sandbox)

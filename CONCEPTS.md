@@ -16,7 +16,7 @@ the same ideas, start at [`docs/learn/`](docs/learn/).
 | [PERM](#perm) | Permissions: what each role may do | 3 |
 | [GUARD](#guard) | Guardrails: injection defense, scope, cost and input checks | 13 |
 | [HITL](#hitl) | Human-in-the-loop approvals | 7 |
-| [OBS](#obs) | Observability: traces, metrics, cost | 7 |
+| [OBS](#obs) | Observability: traces, metrics, cost | 8 |
 | [AUDIT](#audit) | The tamper-evident audit log | 5 |
 | [ORCH](#orch) | Reliability: retries, normalized clients, idempotency | 6 |
 | [EVAL](#eval) | Evals: datasets, record/replay, graders, gates | 24 |
@@ -116,6 +116,7 @@ _Human-in-the-loop approvals._
 _Observability: traces, metrics, cost._
 
 - [Checkpointer: in-memory, or MongoDBSaver when OPSPILOT_STORE=mongo.](opspilot/loops/graph.py#L94) — `opspilot/loops/graph.py:94`
+- [A resumed run gets its own run span, so its spans nest again.](opspilot/loops/graph.py#L698) — `opspilot/loops/graph.py:698`
 - [Raw-loop spans are rebuilt from its event stream, after the run.](opspilot/observability/instrumentation.py#L8) — `opspilot/observability/instrumentation.py:8`
 - [Cost per call from token usage, priced per token type.](opspilot/observability/pricing.py#L56) — `opspilot/observability/pricing.py:56`
 - [Spans form a tree via a contextvar, not parameters.](opspilot/observability/tracer.py#L54) — `opspilot/observability/tracer.py:54`
