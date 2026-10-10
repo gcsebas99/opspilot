@@ -50,6 +50,9 @@ def build_initial_messages(alert: str) -> list[dict[str, Any]]:
     return [{"role": "user", "content": f"New alert:\n{alert}"}]
 
 
+# [HARNESS:CONTEXT] Prompt version: a hash of everything the agent is told.
+# WHY: AGENTS.md, the runbook index and tool schemas define behavior; hashing them
+# tags every run, audit entry and eval, so "did the prompt change?" is a string compare.
 def compute_prompt_version(
     agents_md: str, runbook_index_text: str, tool_schemas: list[dict[str, Any]]
 ) -> str:

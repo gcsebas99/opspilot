@@ -53,6 +53,9 @@ PRICING: dict[str, ModelPricing] = {
 }
 
 
+# [HARNESS:OBS] Cost per call from token usage, priced per token type.
+# WHY: cache reads cost ~10% of input and cache writes more than input, so a single
+# "tokens x price" would misstate the bill; budgets and reports need the real number.
 def cost_usd(
     model: str,
     *,

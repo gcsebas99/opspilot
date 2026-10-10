@@ -51,6 +51,9 @@ class SpanHandle:
         self.attrs[key] = value
 
 
+# [HARNESS:OBS] Spans form a tree via a contextvar, not parameters.
+# WHY: any code running inside an open span (even in awaited coroutines) records
+# it as parent automatically, so nesting needs no plumbing through every call.
 class Tracer:
     """Writes SpanDoc records to a Store, threading parent/child
     relationships through a contextvar instead of explicit parameters --

@@ -1,6 +1,9 @@
 from pydantic import BaseModel, Field
 
 
+# [HARNESS:ENV] Scenarios carry hidden ground truth (root cause, expected fix).
+# WHY: the generator and the evals read it; the agent never can -- tools and context
+# don't touch these fields, so a correct diagnosis has to come from investigating.
 class Scenario(BaseModel):
     """A fault-injection scenario for the ShopStack sandbox.
 

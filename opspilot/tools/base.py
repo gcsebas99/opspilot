@@ -6,6 +6,9 @@ from pydantic import BaseModel, ValidationError
 
 from opspilot.env.sandbox import Sandbox
 
+# [HARNESS:TOOLS] Every tool declares a risk class: read, destructive or terminal.
+# WHY: the permission policy keys off risk, not tool names, so a new tool is
+# governed the moment it's registered -- no policy edit to forget.
 Risk = Literal["read", "destructive", "terminal"]
 
 
@@ -18,6 +21,9 @@ class ToolResult(BaseModel):
     truncated: bool = False
 
 
+# [HARNESS:TOOLS] The tool contract: name, description, input model, risk, function.
+# WHY: one pydantic model is both the argument validator and the JSON schema the
+# model sees, so what a tool accepts can never drift from what it advertises.
 @dataclass(frozen=True)
 class Tool:
     """A single callable capability the model can invoke.

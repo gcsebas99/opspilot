@@ -45,6 +45,9 @@ class ApprovalAlreadyDecided(RuntimeError):
         self.approver = approver
 
 
+# [HARNESS:MEMORY] Short-term memory: the run's state, checkpointed after every node.
+# WHY: the conversation, counters and pending decisions persist through the
+# checkpointer, so a paused run resumes intact -- even in another process.
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     step: int
@@ -159,9 +162,9 @@ def _make_route_after_agent(max_steps: int, token_budget: int) -> Any:
 
 
 async def _nudge_and_retry_node(state: AgentState) -> dict[str, Any]:
-    # [HARNESS:LOOP] Exit condition #5 -- plain text, no tool call. Mirrors
-    # Day 1's raw loop exactly: one nudge back to the contract, then (via
-    # route_after_agent, on the *next* no-tool-call turn) mark_no_report.
+    # [HARNESS:LOOP] Exit condition #5 -- plain text, no tool call.
+    # WHY: same contract as the raw loop: one nudge back to "use a tool or finish",
+    # then mark_no_report on the next plain-text turn.
     nudge = HumanMessage(
         content=(
             "You did not call a tool. Investigate using the available tools, then "
@@ -400,8 +403,9 @@ def _make_tools_node(
                 outcome = "completed" if name == "submit_report" else "escalated"
                 report = result.data
 
-            # [HARNESS:LOOP] Exit condition #4 -- stuck detection, same
-            # 3-strikes-then-nudge-then-stuck shape as the raw loop.
+            # [HARNESS:LOOP] Exit condition #4 -- stuck detection.
+            # WHY: same shape as the raw loop: three identical calls get one nudge, a fourth
+            # ends the run as `stuck`.
             if repeat_count == 3 and not nudged_for_stuck:
                 tool_messages.append(
                     HumanMessage(
@@ -432,16 +436,17 @@ def _make_tools_node(
 
 def _make_route_after_tools(max_steps: int, token_budget: int) -> Any:
     def route_after_tools(state: AgentState) -> str:
-        # [HARNESS:LOOP] Exit condition #1 -- terminal tool called (or #4,
-        # stuck) already set outcome directly in the tools node; this is
-        # just the routing decision, never the source of truth for *why*.
+        # [HARNESS:LOOP] Exit condition #1 -- the run already has an outcome.
+        # WHY: the tools node sets it (terminal tool, or stuck); routing only reads it, so
+        # there's one source of truth for *why* the run ended.
         if state["outcome"] is not None:
             return END
         # [HARNESS:LOOP] Exit condition #2 -- hard step cap.
+        # WHY: the cheapest backstop against a model that never finishes.
         if state["step"] >= max_steps:
             return _MARK_MAX_STEPS
-        # [HARNESS:LOOP] Exit condition #3 -- cumulative token budget,
-        # including cache tokens (see react_raw.py for why).
+        # [HARNESS:LOOP] Exit condition #3 -- cumulative token budget (cache included).
+        # WHY: steps don't bound cost; one step can carry a huge tool result.
         if _cumulative_tokens(state["tokens_used"]) > token_budget:
             return _MARK_BUDGET_EXCEEDED
         return "agent"

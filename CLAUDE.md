@@ -81,6 +81,8 @@ Rules:
   - `uv run mypy opspilot`
   - `uv run opspilot run --scenario <name> --seed 42`
   - `uv run opspilot eval --suite smoke --mode replay`
+  - `uv run python scripts/concepts.py` (regenerate `CONCEPTS.md`; `--check` in CI)
+  - `uv run python scripts/check_docs.py` (docs links + `file::symbol` references; `--external` checks web links)
 
 ## Definition of done (per sub-task)
 

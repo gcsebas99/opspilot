@@ -95,6 +95,9 @@ async def run_react_loop(
 
     system = build_system_blocks()
     tools_schema = registry.to_anthropic_schema()
+    # [HARNESS:MEMORY] Short-term memory, by hand: the messages list *is* the context.
+    # WHY: every turn appends the model's reply and tool results, and the whole list
+    # is resent each call -- the model remembers nothing between calls on its own.
     messages: list[dict[str, Any]] = build_initial_messages(alert)
 
     totals = TokenTotals()
