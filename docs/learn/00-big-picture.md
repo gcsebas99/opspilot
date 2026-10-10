@@ -49,7 +49,7 @@ flowchart TB
         EVAL["Eval runner: opspilot eval"]
     end
     SVC["Run service<br/>opspilot/runs.py"]
-    subgraph loop["The loop (two implementations)"]
+    subgraph loops["The loop (two implementations)"]
         RAW["raw: react_raw.py"]
         GRAPH["graph: LangGraph, graph.py"]
     end
@@ -61,14 +61,14 @@ flowchart TB
     SBX["Sandbox<br/>seeded ShopStack copy"]
     STORE[("Store<br/>runs, spans, audit, approvals")]
 
-    starts --> SVC --> loop
-    CTX --> loop
-    loop <--> MODEL
-    loop --> POLICY
+    starts --> SVC --> loops
+    CTX --> loops
+    loops <--> MODEL
+    loops --> POLICY
     POLICY -- "require approval" --> HITL
-    HITL -- "approve / reject" --> loop
+    HITL -- "approve / reject" --> loops
     POLICY -- "allowed" --> TOOLS --> SBX
-    loop --> STORE
+    loops --> STORE
 ```
 
 The **run service** builds a run (sandbox, record in the store) and hands it to one of two
@@ -86,7 +86,7 @@ sequenceDiagram
     autonumber
     actor Human
     participant App as Web app + run service
-    participant Loop as Graph loop
+    participant Graph as Graph loop
     participant Model
     participant Policy
     participant Tools as Tools + sandbox
@@ -94,26 +94,26 @@ sequenceDiagram
 
     Human->>App: start run (scenario, role)
     App->>Store: RunDoc, fresh sandbox from (scenario, seed)
-    App->>Loop: system prompt + alert
+    App->>Graph: system prompt + alert
     loop until a terminal tool, or an exit condition
-        Loop->>Model: everything so far (+ tool schemas)
-        Model-->>Loop: tool_use: query_metrics(checkout, latency)
-        Loop->>Policy: role x tool risk, scope check
-        Policy-->>Loop: allow
-        Loop->>Tools: run it (framed as untrusted data, truncated)
-        Tools-->>Loop: result
-        Loop->>Store: spans (model call, policy check, tool call)
+        Graph->>Model: everything so far (+ tool schemas)
+        Model-->>Graph: tool_use: query_metrics(checkout, latency)
+        Graph->>Policy: role x tool risk, scope check
+        Policy-->>Graph: allow
+        Graph->>Tools: run it (framed as untrusted data, truncated)
+        Tools-->>Graph: result
+        Graph->>Store: spans (model call, policy check, tool call)
     end
-    Model-->>Loop: tool_use: rollback_config(checkout, 12)
-    Loop->>Policy: destructive + operator
-    Policy-->>Loop: require approval
-    Loop->>Store: pending approval, checkpoint (run paused)
+    Model-->>Graph: tool_use: rollback_config(checkout, 12)
+    Graph->>Policy: destructive + operator
+    Policy-->>Graph: require approval
+    Graph->>Store: pending approval, checkpoint (run paused)
     Human->>App: approve
-    App->>Loop: resume from the checkpoint
-    Loop->>Tools: rollback_config runs
-    Loop->>Store: audit entry (decision, then execution)
-    Model-->>Loop: tool_use: submit_report(root cause, evidence)
-    Loop->>Store: outcome, tokens, cost, report
+    App->>Graph: resume from the checkpoint
+    Graph->>Tools: rollback_config runs
+    Graph->>Store: audit entry (decision, then execution)
+    Model-->>Graph: tool_use: submit_report(root cause, evidence)
+    Graph->>Store: outcome, tokens, cost, report
 ```
 
 The same steps, with where they live:
