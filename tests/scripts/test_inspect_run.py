@@ -26,3 +26,11 @@ def test_operator_run_approve_and_tamper_shows_detection(
 def test_unrecorded_path_is_reported(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--scenario", "db_disk_full", "--role", "admin"]) == 2
     assert "no recorded demo path" in capsys.readouterr().out
+
+
+def test_state_flag_shows_the_paused_checkpoint(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--scenario", "checkout_pool_exhaustion", "--role", "operator", "--state"]) == 0
+    out = capsys.readouterr().out
+    assert "CHECKPOINTS saved for this run:" in out
+    assert "messages (the conversation): 14" in out
+    assert "waiting on: rollback_config" in out

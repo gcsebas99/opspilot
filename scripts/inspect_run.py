@@ -6,7 +6,8 @@
 
 Prints the trace (spans as a tree), the audit log with its hash chain, and the
 chain verification -- and with --tamper, edits one audit entry and shows the
-verification catching it. Replay mode and an in-memory store: $0, no API key,
+verification catching it. With --state, prints what the checkpointer holds for
+a paused run (the agent's short-term memory). Replay mode and an in-memory store: $0, no API key,
 no database. A learning tool for docs/learn/ (paths 5, 6 and 9).
 """
 
@@ -28,7 +29,26 @@ from opspilot.store.memory import MemoryStore
 from opspilot.web.trace_view import build_waterfall
 
 
-async def inspect(scenario: str, role: str, approve: bool, tamper: bool) -> int:
+def print_checkpoint(checkpointer: InMemorySaver, run_id: str) -> None:
+    """What LangGraph saved for this run: the short-term memory a resume reads."""
+    config = {"configurable": {"thread_id": run_id}}
+    saved = checkpointer.get_tuple(config)
+    if saved is None:
+        print("no checkpoint")
+        return
+    values = saved.checkpoint["channel_values"]
+    print(f"\nCHECKPOINTS saved for this run: {len(list(checkpointer.list(config)))}")
+    print(f"  state fields: {', '.join(sorted(k for k in values if ':' not in k))}")
+    print(f"  messages (the conversation): {len(values.get('messages', []))}")
+    print(f"  step: {values.get('step')}   tokens so far: {values.get('tokens_used')}")
+    for _task, channel, value in saved.pending_writes or []:
+        if channel == "__interrupt__":
+            print(
+                f"  waiting on: {value[0].value['tool']}({value[0].value['args']}) -> needs a human"
+            )
+
+
+async def inspect(scenario: str, role: str, approve: bool, tamper: bool, state: bool) -> int:
     settings = Settings.model_validate(
         {"ANTHROPIC_API_KEY": "", "OPSPILOT_MODEL": "claude-haiku-4-5", "OPSPILOT_STORE": "memory"}
     )
@@ -44,13 +64,15 @@ async def inspect(scenario: str, role: str, approve: bool, tamper: bool) -> int:
             settings,
             scenario=scenario,
             seed=42,
-            role=role,  # type: ignore[arg-type]
+            role=role,
             strategy="graph",
             mode="replay",
             cassette=cassette,
             sandbox_dir=Path(tmp) / "sandbox",
         )
         result = await start_graph(handle, store, checkpointer)
+        if state:
+            print_checkpoint(checkpointer, handle.run.run_id)
         if result.outcome == "awaiting_approval":
             print(f"paused for approval: {result.pending_approval}")
             if not approve:
@@ -98,8 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--role", default="viewer")
     parser.add_argument("--approve", action="store_true", help="approve a pending action")
     parser.add_argument("--tamper", action="store_true", help="edit an audit entry, re-verify")
+    parser.add_argument("--state", action="store_true", help="print the saved checkpoint state")
     args = parser.parse_args(argv)
-    return asyncio.run(inspect(args.scenario, args.role, args.approve, args.tamper))
+    return asyncio.run(inspect(args.scenario, args.role, args.approve, args.tamper, args.state))
 
 
 if __name__ == "__main__":
